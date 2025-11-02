@@ -1,8 +1,10 @@
-streamlit==1.37.1
-pymupdf==1.24.8
-beautifulsoup4==4.12.3
-scikit-learn==1.5.1
-matplotlib==3.9.2
-langdetect==1.0.9
-vaderSentiment==3.3.2
+streamlit
+pymupdf
+beautifulsoup4
+scikit-learn
+matplotlib
+langdetect
+vaderSentiment
+numpy
+
 
