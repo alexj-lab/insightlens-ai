@@ -119,7 +119,7 @@ BULLET_PAT = re.compile(r'^\s*[\-\•\–\*]\s+')
 
 def looks_like_heading(ln: str) -> bool:
     if not ln: return False
-    if len(ln) <= 8:  # very short line (e.g., "Results")
+    if len(ln) <= 8:
         return True
     if ln.endswith(':'):
         return True
@@ -148,7 +148,6 @@ def split_sentences(text: str):
         if BULLET_PAT.match(p) or looks_like_heading(p):
             sents.append(p)
             continue
-        # split sentence-ish (FR/EN)
         chunks = re.split(r'(?<=[\.\!\?])\s+(?=[A-ZÉÈÊÀÂÎÔÛÇ])', p)
         for c in chunks:
             c = c.strip()
@@ -156,7 +155,6 @@ def split_sentences(text: str):
             if BULLET_PAT.match(c) or looks_like_heading(c) or len(c) >= MIN_SENTENCE_LENGTH:
                 sents.append(c)
 
-    # dedupe (order-preserving)
     seen, clean = set(), []
     for s in sents:
         key = s.lower()
@@ -177,17 +175,21 @@ def build_tfidf(sentences, max_features=12000):
     return vect, X
 
 def sentence_position_bonus(n_sent, idx):
-    # earlier sentences get a small bonus (informational structure)
     return 1.0 - 0.4 * (idx / max(n_sent-1, 1))
 
 def mmr_select(X, k, diversity=0.7):
     """Maximal Marginal Relevance to avoid redundancy."""
     sim = cosine_similarity(X)
     n = sim.shape[0]
-    selected = []
-    # relevance ~ max tf-idf per sentence
-    rel = X.max(axis=1).A.ravel() if hasattr(X.max(axis=1), "A") else np.asarray(X.max(axis=1)).ravel()
 
+    # relevance ~ max tf-idf per sentence (AS DENSE ARRAY)
+    X_max = X.max(axis=1)
+    if hasattr(X_max, "toarray"):
+        rel = X_max.toarray().ravel()
+    else:
+        rel = np.array(X_max).ravel()
+
+    selected = []
     first = int(rel.argmax())
     selected.append(first)
     cand = set(range(n)) - {first}
@@ -204,34 +206,16 @@ def mmr_select(X, k, diversity=0.7):
     return sorted(selected)
 
 def rewrite_sentence(s: str) -> str:
-    """
-    Rule-based compression / rewrite to sound more 'abstractive':
-    - remove parentheticals, weak lead-ins, redundant clauses,
-    - normalize connectors,
-    - light lemmatization-like cleanups (regex only).
-    """
+    """Rule-based compression / rewrite for cleaner summary."""
     x = s.strip()
-
-    # remove parentheticals (one level)
     x = re.sub(r'\s*\([^)]*\)', '', x)
-
-    # drop common lead-ins
     x = re.sub(r'^(However|Moreover|Furthermore|Additionally|In addition|Ainsi|Cependant|Toutefois)[,:]\s+', '', x, flags=re.IGNORECASE)
     x = re.sub(r'^(According to|Per|As noted|Comme indiqué|D’après)\s+[^:]+:\s+', '', x, flags=re.IGNORECASE)
-
-    # compress "which/that" relative clauses lightly
     x = re.sub(r'\s*,\s*(which|that)\s+', ' ', x, flags=re.IGNORECASE)
-
-    # simplify "due to / because of"
     x = re.sub(r'\b(due to|because of|owing to|en raison de|à cause de)\b', 'because of', x, flags=re.IGNORECASE)
-
-    # normalize connectors
     x = re.sub(r'\b(in order to|afin de)\b', 'to', x, flags=re.IGNORECASE)
     x = re.sub(r'\b(such as|comme|par exemple)\b', 'for example', x, flags=re.IGNORECASE)
-
-    # trim whitespace and stray punctuation
     x = re.sub(r'\s{2,}', ' ', x).strip(' -–—;:,')
-    # ensure period
     if not re.search(r'[.!?]$', x):
         x += '.'
     return x
@@ -239,11 +223,11 @@ def rewrite_sentence(s: str) -> str:
 def summarize_text(text: str, target_sentences=TOP_SENTENCES):
     """
     Hybrid extractive → rewrite:
-      1) segment sentences/heads/bullets
-      2) score with TF-IDF centrality + position + title similarity
-      3) select via MMR (diversity)
-      4) rewrite each sentence (compression + connectors)
-      5) return 5 clean bullets
+      1) segmentation
+      2) score (TF-IDF centrality + position + title similarity) as dense arrays
+      3) MMR selection
+      4) rewrite
+      5) return 5 bullets
     """
     sentences = split_sentences(text)
     if len(sentences) == 0:
@@ -253,27 +237,35 @@ def summarize_text(text: str, target_sentences=TOP_SENTENCES):
         chosen = [rewrite_sentence(s) for s in sentences]
     else:
         title = title_from_text(text)
-
         vect, X = build_tfidf(sentences, max_features=12000)
-        centrality = X.max(axis=1).A.ravel() if hasattr(X.max(axis=1), "A") else np.asarray(X.max(axis=1)).ravel()
 
+        # centrality as DENSE
+        X_max = X.max(axis=1)
+        if hasattr(X_max, "toarray"):
+            centrality = X_max.toarray().ravel()
+        else:
+            centrality = np.array(X_max).ravel()
+
+        # title similarity as DENSE
         title_sim = np.zeros(len(sentences))
         if title:
             try:
                 Xt = vect.transform([title])
-                title_sim = cosine_similarity(X, Xt).ravel()
+                title_sim_mat = cosine_similarity(X, Xt)
+                title_sim = np.asarray(title_sim_mat).ravel()
             except Exception:
                 title_sim = np.zeros(len(sentences))
 
-        pos_bonus = np.array([sentence_position_bonus(len(sentences), i) for i in range(len(sentences))])
+        pos_bonus = np.array([sentence_position_bonus(len(sentences), i) for i in range(len(sentences))], dtype=float)
 
+        # all dense → safe arithmetic
         score = 0.60 * centrality + 0.25 * pos_bonus + 0.15 * title_sim
-        X_bias = X.multiply(score.reshape(-1, 1))
 
+        # bias X and select with MMR
+        X_bias = X.multiply(score.reshape(-1, 1))
         keep_idx = mmr_select(X_bias, k=target_sentences, diversity=0.7)
         chosen = [rewrite_sentence(sentences[i]) for i in keep_idx]
 
-    # keep the first 5 as final bullets (clean, no duplicates)
     bullets = []
     seen = set()
     for b in chosen:
@@ -285,7 +277,6 @@ def summarize_text(text: str, target_sentences=TOP_SENTENCES):
             break
 
     if not bullets:
-        # fallback: take first sentences and rewrite
         bullets = [rewrite_sentence(s) for s in sentences[:5]]
     return bullets
 
@@ -313,7 +304,6 @@ def extract_keywords(text: str, top_n=TOP_KEYWORDS):
     if X.shape[1] == 0:
         return []
 
-    # dense-safe
     if isinstance(X, (coo_matrix, csr_matrix)):
         X_dense = X.toarray()
     else:
@@ -468,7 +458,6 @@ if upl:
         with st.expander("Raw scores"):
             st.json(senti)
 
-    # Exports
     payload = {
         "meta": {
             "timestamp": datetime.utcnow().isoformat() + "Z",
