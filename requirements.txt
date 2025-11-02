@@ -2,7 +2,6 @@ streamlit
 pymupdf
 beautifulsoup4
 scikit-learn
-matplotlib
 numpy
-scipy
+matplotlib
 vaderSentiment
