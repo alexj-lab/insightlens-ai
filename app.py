@@ -4,12 +4,11 @@ import re
 import fitz
 from bs4 import BeautifulSoup
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
-from collections import Counter
 import json
 from datetime import datetime
 import warnings
@@ -35,51 +34,34 @@ STOP_WORDS = set([
     "than", "too", "very", "just", "but", "or", "as", "at", "from", "into", "through"
 ])
 
-# CSS Ultra-propre
+# CSS propre
 st.markdown("""
 <style>
-    /* Reset et base */
     .main-header {
         font-size: 2.5rem;
         font-weight: 700;
         color: #1a73e8;
         margin-bottom: 0.5rem;
-        letter-spacing: -0.02em;
     }
     .subtitle {
         font-size: 1rem;
         color: #5f6368;
         margin-bottom: 2rem;
-        font-weight: 400;
     }
-    
-    /* Summary container */
-    .summary-container {
+    .summary-box {
         background: #ffffff;
         border: 1px solid #dadce0;
         border-radius: 8px;
         padding: 2rem;
         margin: 2rem 0;
-        box-shadow: 0 1px 2px 0 rgba(60,64,67,0.3), 0 1px 3px 1px rgba(60,64,67,0.15);
+        box-shadow: 0 1px 2px rgba(60,64,67,0.3);
     }
-    .summary-point {
+    .summary-text {
         color: #202124;
-        font-size: 1rem;
+        font-size: 1.05rem;
         line-height: 1.8;
-        margin: 1rem 0;
-        padding-left: 1.5rem;
-        position: relative;
+        text-align: justify;
     }
-    .summary-point:before {
-        content: "•";
-        position: absolute;
-        left: 0;
-        color: #1a73e8;
-        font-weight: bold;
-        font-size: 1.2rem;
-    }
-    
-    /* Stats */
     .stat-card {
         background: #ffffff;
         border: 1px solid #e8eaed;
@@ -87,25 +69,17 @@ st.markdown("""
         padding: 1.2rem;
         text-align: center;
         margin: 0.5rem 0;
-        transition: box-shadow 0.2s;
-    }
-    .stat-card:hover {
-        box-shadow: 0 1px 3px 0 rgba(60,64,67,0.3);
     }
     .stat-value {
         font-size: 2.2rem;
         font-weight: 700;
         color: #1a73e8;
-        line-height: 1;
     }
     .stat-label {
         font-size: 0.875rem;
         color: #5f6368;
         margin-top: 0.5rem;
-        font-weight: 500;
     }
-    
-    /* Info boxes */
     .info-box {
         background: #e8f0fe;
         border-left: 4px solid #1967d2;
@@ -114,34 +88,36 @@ st.markdown("""
         margin: 1.5rem 0;
         color: #174ea6;
     }
-    .info-box strong {
-        color: #1967d2;
-    }
-    
-    /* Sentiment explanation */
-    .sentiment-box {
+    .sentiment-card {
         background: #ffffff;
         border: 1px solid #dadce0;
         border-radius: 8px;
-        padding: 1.5rem;
+        padding: 2rem;
         margin: 1.5rem 0;
-        line-height: 1.7;
-        color: #202124;
+        box-shadow: 0 1px 2px rgba(60,64,67,0.2);
     }
-    .sentiment-box h4 {
+    .sentiment-card h3 {
         color: #1a73e8;
-        margin-top: 1rem;
-        margin-bottom: 0.5rem;
+        margin-bottom: 1rem;
     }
-    
-    /* Badges */
+    .sentiment-card h4 {
+        color: #5f6368;
+        margin-top: 1.5rem;
+        margin-bottom: 0.75rem;
+        font-size: 1.1rem;
+    }
+    .sentiment-card p {
+        color: #202124;
+        line-height: 1.7;
+        margin-bottom: 1rem;
+    }
     .badge {
         display: inline-block;
-        padding: 0.25rem 0.75rem;
-        border-radius: 12px;
+        padding: 0.4rem 0.9rem;
+        border-radius: 16px;
         font-size: 0.875rem;
-        font-weight: 500;
-        margin: 0.25rem;
+        font-weight: 600;
+        margin-left: 0.5rem;
     }
     .badge-positive {
         background: #e6f4ea;
@@ -222,86 +198,62 @@ def split_sentences(text):
     sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
     return [s.strip() for s in sentences if len(s.strip()) >= MIN_SENTENCE_LENGTH]
 
-def advanced_extractive_summary(text, num_sentences=10):
+def textrank_summary_paragraph(text, num_sentences=12):
     """
-    Résumé extractif avancé avec TF-IDF + MMR (Maximal Marginal Relevance)
-    pour diversité et qualité maximale
+    TextRank optimisé qui retourne un PARAGRAPHE fluide
     """
     sentences = split_sentences(text)
     
     if len(sentences) <= num_sentences:
-        return sentences
+        return " ".join(sentences)
     
     try:
         # Vectorisation TF-IDF
         vectorizer = TfidfVectorizer(
             stop_words=list(STOP_WORDS),
             ngram_range=(1, 2),
-            max_features=10000,
-            min_df=1,
-            max_df=0.85
+            max_features=10000
         )
         
         X = vectorizer.fit_transform(sentences)
         
-        # Calculer scores TF-IDF moyens par phrase
-        tfidf_scores = np.asarray(X.mean(axis=1)).flatten()
+        # Matrice de similarité
+        similarity_matrix = cosine_similarity(X)
         
-        # Bonus pour position (premières phrases souvent importantes)
-        position_scores = np.array([1.0 - (i / len(sentences)) * 0.4 for i in range(len(sentences))])
+        # TextRank scores (PageRank sur graphe de similarité)
+        scores = np.ones(len(sentences))
         
-        # Score combiné
-        combined_scores = tfidf_scores * position_scores
-        
-        # Sélectionner top phrases avec MMR pour diversité
-        selected_indices = []
-        remaining_indices = list(range(len(sentences)))
-        
-        # Première phrase = meilleur score
-        first_idx = combined_scores.argmax()
-        selected_indices.append(first_idx)
-        remaining_indices.remove(first_idx)
-        
-        # Sélection itérative avec MMR
-        for _ in range(num_sentences - 1):
-            if not remaining_indices:
-                break
+        # Itérations TextRank
+        for _ in range(20):
+            new_scores = np.zeros(len(sentences))
+            for i in range(len(sentences)):
+                for j in range(len(sentences)):
+                    if i != j and similarity_matrix[i][j] > 0:
+                        new_scores[i] += similarity_matrix[i][j] * scores[j]
             
-            best_score = -1
-            best_idx = None
-            
-            for idx in remaining_indices:
-                # Score de pertinence
-                relevance = combined_scores[idx]
-                
-                # Pénalité de similarité avec phrases déjà sélectionnées
-                similarities = []
-                for sel_idx in selected_indices:
-                    sim = np.dot(X[idx].toarray().flatten(), X[sel_idx].toarray().flatten())
-                    similarities.append(sim)
-                
-                max_similarity = max(similarities) if similarities else 0
-                
-                # MMR score (balance pertinence et diversité)
-                mmr_score = 0.7 * relevance - 0.3 * max_similarity
-                
-                if mmr_score > best_score:
-                    best_score = mmr_score
-                    best_idx = idx
-            
-            if best_idx is not None:
-                selected_indices.append(best_idx)
-                remaining_indices.remove(best_idx)
+            scores = 0.85 * new_scores + 0.15
+            scores = scores / np.linalg.norm(scores)
         
-        # Trier par ordre d'apparition
-        selected_indices.sort()
+        # Bonus position (début de doc)
+        position_bonus = np.array([1.0 - (i / len(sentences)) * 0.3 for i in range(len(sentences))])
+        scores = scores * position_bonus
         
-        return [sentences[i] for i in selected_indices]
+        # Sélectionner top phrases
+        top_indices = scores.argsort()[-num_sentences:][::-1]
+        
+        # IMPORTANT : Trier par ordre d'apparition pour cohérence
+        top_indices_sorted = sorted(top_indices)
+        
+        selected_sentences = [sentences[i] for i in top_indices_sorted]
+        
+        # Assembler en paragraphe fluide avec transitions
+        paragraph = " ".join(selected_sentences)
+        
+        return paragraph
     
     except Exception as e:
-        st.error(f"Summary error: {e}")
         # Fallback simple
-        return sentences[:num_sentences]
+        return " ".join(sentences[:num_sentences])
 
 def extract_keywords(text, top_n=15):
     paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if len(p.strip()) > 50]
@@ -367,70 +319,6 @@ def analyze_sentiment(text):
     except:
         return {'positive': 0, 'neutral': 1, 'negative': 0, 'compound': 0}
 
-def generate_sentiment_explanation(scores):
-    """Génère explication détaillée"""
-    compound = scores['compound']
-    pos = scores['positive']
-    neu = scores['neutral']
-    neg = scores['negative']
-    
-    # Déterminer badge
-    if compound >= 0.05:
-        badge = '<span class="badge badge-positive">POSITIVE</span>'
-        tone = "positive"
-    elif compound <= -0.05:
-        badge = '<span class="badge badge-negative">NEGATIVE</span>'
-        tone = "negative"
-    else:
-        badge = '<span class="badge badge-neutral">NEUTRAL</span>'
-        tone = "neutral"
-    
-    explanation = f"""
-<div class="sentiment-box">
-    <h3>Overall Assessment {badge}</h3>
-    <p><strong>Compound Score: {compound:.3f}</strong> (scale: -1 to +1)</p>
-    
-    <h4>📊 Distribution Breakdown</h4>
-    
-    <p><strong>Positive Content ({pos:.1%}):</strong><br>
-    Language expressing favorable opinions, satisfaction, praise, or optimistic perspectives. 
-    {'This is the <strong>dominant emotion</strong> in the document.' if pos == max(pos, neu, neg) else ''}</p>
-    
-    <p><strong>Neutral Content ({neu:.1%}):</strong><br>
-    Factual statements, objective descriptions, and balanced language without strong emotional coloring.
-    {'This is the <strong>dominant style</strong> in the document.' if neu == max(pos, neu, neg) else ''}</p>
-    
-    <p><strong>Negative Content ({neg:.1%}):</strong><br>
-    Language expressing criticism, concerns, dissatisfaction, or problematic issues.
-    {'This is the <strong>dominant emotion</strong> in the document.' if neg == max(pos, neu, neg) else ''}</p>
-    
-    <h4>💡 Interpretation</h4>
-    <p>
-"""
-    
-    if compound >= 0.5:
-        explanation += "<strong>Very Positive Document:</strong> Expresses strong favorable sentiment, enthusiasm, or highly positive outcomes."
-    elif compound >= 0.05:
-        explanation += "<strong>Moderately Positive Document:</strong> Generally constructive with more favorable than unfavorable content."
-    elif compound <= -0.5:
-        explanation += "<strong>Very Negative Document:</strong> Expresses strong criticism, serious concerns, or negative outcomes."
-    elif compound <= -0.05:
-        explanation += "<strong>Moderately Negative Document:</strong> Contains criticism or concerns with more unfavorable than favorable content."
-    else:
-        explanation += "<strong>Neutral Document:</strong> Maintains objective, balanced tone. Typical of factual reports or technical documents."
-    
-    explanation += """
-    </p>
-    
-    <h4>📖 Context</h4>
-    <p>VADER (Valence Aware Dictionary and sEntiment Reasoner) analyzes text by examining individual words, 
-    punctuation patterns, capitalization, and contextual modifiers. It's particularly effective for business documents, 
-    news articles, and social media content.</p>
-</div>
-"""
-    
-    return explanation
-
 def readability_metrics(text):
     sentences = split_sentences(text)
     words = text.split()
@@ -454,25 +342,23 @@ def plot_sentiment(scores):
     colors = ['#34a853', '#5f6368', '#ea4335']
     
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='white')
-    
     bars = ax.bar(labels, values, color=colors, width=0.5, edgecolor='none', alpha=0.9)
     
     for bar, val in zip(bars, values):
         height = bar.get_height()
         ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
-                f'{val:.1%}', ha='center', va='bottom', fontsize=13, fontweight='700', color='#202124')
+                f'{val:.1%}', ha='center', va='bottom', fontsize=13, fontweight='700')
     
     ax.set_ylim(0, 1.1)
-    ax.set_ylabel('Probability', fontsize=12, fontweight='600', color='#5f6368')
+    ax.set_ylabel('Probability', fontsize=12, fontweight='600')
     ax.set_title('Sentiment Distribution', fontsize=14, fontweight='700', color='#1a73e8', pad=20)
-    ax.grid(axis='y', alpha=0.15, linestyle='-', linewidth=0.5)
+    ax.grid(axis='y', alpha=0.15)
     
     for spine in ['top', 'right']:
         ax.spines[spine].set_visible(False)
     for spine in ['left', 'bottom']:
         ax.spines[spine].set_color('#dadce0')
     
-    ax.tick_params(colors='#5f6368')
     plt.tight_layout()
     return fig
 
@@ -484,26 +370,24 @@ def plot_keywords(pairs):
     scores = [s for _, s in pairs[:12]]
     
     fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
-    
     bars = ax.barh(range(len(terms)), scores, color='#1967d2', height=0.65, edgecolor='none')
     
     for bar, score in zip(bars, scores):
         width = bar.get_width()
         ax.text(width + 0.01, bar.get_y() + bar.get_height()/2,
-                f'{score:.3f}', ha='left', va='center', fontsize=10, fontweight='600', color='#5f6368')
+                f'{score:.3f}', ha='left', va='center', fontsize=10, fontweight='600')
     
     ax.set_yticks(range(len(terms)))
-    ax.set_yticklabels(terms[::-1], fontsize=11, color='#202124')
-    ax.set_xlabel('TF-IDF Score', fontsize=12, fontweight='600', color='#5f6368')
-    ax.set_title('Top Keywords & Phrases', fontsize=14, fontweight='700', color='#1a73e8', pad=20)
-    ax.grid(axis='x', alpha=0.15, linestyle='-', linewidth=0.5)
+    ax.set_yticklabels(terms[::-1], fontsize=11)
+    ax.set_xlabel('TF-IDF Score', fontsize=12, fontweight='600')
+    ax.set_title('Top Keywords', fontsize=14, fontweight='700', color='#1a73e8', pad=20)
+    ax.grid(axis='x', alpha=0.15)
     
     for spine in ['top', 'right']:
         ax.spines[spine].set_visible(False)
     for spine in ['left', 'bottom']:
         ax.spines[spine].set_color('#dadce0')
     
-    ax.tick_params(colors='#5f6368')
     plt.tight_layout()
     return fig
 
@@ -511,19 +395,19 @@ def plot_keywords(pairs):
 st.set_page_config(page_title="InsightLens AI Pro", page_icon="🔍", layout="wide")
 
 st.markdown('<p class="main-header">InsightLens AI Pro</p>', unsafe_allow_html=True)
-st.markdown('<p class="subtitle">Professional Document Analysis & Intelligence System</p>', unsafe_allow_html=True)
+st.markdown('<p class="subtitle">Advanced Document Analysis with TextRank Summarization</p>', unsafe_allow_html=True)
 st.markdown("---")
 
 with st.sidebar:
-    st.markdown("### ⚙️ Analysis Settings")
-    num_summary = st.slider("Summary sentences", 5, 15, 10, help="Number of key sentences to extract")
-    num_keywords = st.slider("Keywords", 8, 20, 12, help="Number of distinctive terms")
+    st.markdown("### ⚙️ Settings")
+    num_sentences = st.slider("Summary length", 8, 15, 12, help="Number of sentences")
+    num_keywords = st.slider("Keywords", 8, 20, 12)
     
     st.markdown("---")
     st.markdown("### 🤖 AI Models")
-    st.caption("• Advanced TF-IDF + MMR")
-    st.caption("• VADER Sentiment")
-    st.caption("• Statistical Analysis")
+    st.caption("• TextRank (Graph-based)")
+    st.caption("• TF-IDF (Statistical)")
+    st.caption("• VADER (Sentiment)")
 
 uploaded_file = st.file_uploader("📂 Upload Document", type=["pdf", "txt", "html", "htm"])
 
@@ -536,7 +420,7 @@ if uploaded_file:
         progress = st.progress(0)
         status = st.empty()
         
-        status.text("📖 Reading document...")
+        status.text("Reading document...")
         progress.progress(20)
         text = read_any(temp_path)
         
@@ -545,24 +429,20 @@ if uploaded_file:
             st.error("❌ Document too short (minimum 100 words)")
             st.stop()
         
-        num_sentences = len(split_sentences(text))
-        st.success(f"✅ **{uploaded_file.name}** • {len(words):,} words • {num_sentences} sentences")
+        num_sent = len(split_sentences(text))
+        st.success(f"✅ **{uploaded_file.name}** • {len(words):,} words • {num_sent} sentences")
         
-        status.text("🔍 Generating summary...")
+        status.text("Generating summary with TextRank...")
         progress.progress(40)
-        summary = advanced_extractive_summary(text, num_sentences=num_summary)
+        summary = textrank_summary_paragraph(text, num_sentences=num_sentences)
         
-        status.text("💭 Analyzing sentiment...")
-        progress.progress(60)
+        status.text("Analyzing sentiment...")
+        progress.progress(65)
         sentiment_scores = analyze_sentiment(text)
-        sentiment_explanation = generate_sentiment_explanation(sentiment_scores)
         
-        status.text("🔑 Extracting keywords...")
-        progress.progress(80)
+        status.text("Extracting keywords...")
+        progress.progress(85)
         keywords = extract_keywords(text, top_n=num_keywords)
-        
-        status.text("📊 Computing metrics...")
-        progress.progress(95)
         readability = readability_metrics(text)
         
         progress.progress(100)
@@ -578,27 +458,30 @@ if uploaded_file:
             
             st.markdown("""
             <div class="info-box">
-                <strong>Method:</strong> Advanced Extractive Summarization (TF-IDF + MMR)<br>
-                <strong>Algorithm:</strong> Combines statistical importance with maximal marginal relevance for diversity<br>
-                <strong>Quality:</strong> Selects most informative sentences while avoiding redundancy
+                <strong>Algorithm:</strong> TextRank (Graph-based extractive summarization)<br>
+                <strong>Method:</strong> Selects most important sentences and assembles them in document order<br>
+                <strong>Quality:</strong> Professional, coherent, comprehensive
             </div>
             """, unsafe_allow_html=True)
             
-            st.markdown('<div class="summary-container">', unsafe_allow_html=True)
-            for sentence in summary:
-                st.markdown(f'<p class="summary-point">{sentence}</p>', unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown(f"""
+            <div class="summary-box">
+                <div class="summary-text">{summary}</div>
+            </div>
+            """, unsafe_allow_html=True)
             
             st.markdown("---")
-            st.markdown("### How This Works")
+            st.markdown("### How TextRank Works")
             st.markdown("""
-            This summary uses **Advanced Extractive Summarization** combining:
+            TextRank is inspired by Google's PageRank algorithm. It:
             
-            1. **TF-IDF Scoring**: Identifies sentences with the most important terms
-            2. **Position Weighting**: Gives priority to sentences at the beginning (often more important)
-            3. **MMR (Maximal Marginal Relevance)**: Ensures diversity by avoiding similar sentences
+            1. **Builds a graph** where sentences are nodes
+            2. **Calculates similarity** between all sentence pairs
+            3. **Runs PageRank** to find most "central" sentences
+            4. **Selects top sentences** based on importance scores
+            5. **Orders them** by document position for coherence
             
-            The result is a concise summary that captures key information without redundancy.
+            This creates a fluent, paragraph-style summary that captures key information.
             """)
         
         # TAB 2: SENTIMENT
@@ -607,9 +490,8 @@ if uploaded_file:
             
             st.markdown("""
             <div class="info-box">
-                <strong>Model:</strong> VADER (Valence Aware Dictionary and sEntiment Reasoner)<br>
-                <strong>Method:</strong> Lexicon-based with contextual awareness<br>
-                <strong>Scale:</strong> Compound score from -1 (very negative) to +1 (very positive)
+                <strong>Model:</strong> VADER (Valence Aware Dictionary)<br>
+                <strong>Scale:</strong> -1 (very negative) to +1 (very positive)
             </div>
             """, unsafe_allow_html=True)
             
@@ -619,7 +501,36 @@ if uploaded_file:
                 plt.close(fig_sent)
             
             st.markdown("---")
-            st.markdown(sentiment_explanation, unsafe_allow_html=True)
+            
+            compound = sentiment_scores['compound']
+            
+            if compound >= 0.05:
+                badge = '<span class="badge badge-positive">POSITIVE</span>'
+                tone = "positive"
+            elif compound <= -0.05:
+                badge = '<span class="badge badge-negative">NEGATIVE</span>'
+                tone = "negative"
+            else:
+                badge = '<span class="badge badge-neutral">NEUTRAL</span>'
+                tone = "neutral"
+            
+            st.markdown(f"""
+            <div class="sentiment-card">
+                <h3>Overall Assessment {badge}</h3>
+                <p><strong>Compound Score: {compound:.3f}</strong></p>
+                
+                <h4>Distribution Breakdown</h4>
+                
+                <p><strong>Positive ({sentiment_scores['positive']:.1%}):</strong> Language expressing favorable opinions or optimism.</p>
+                
+                <p><strong>Neutral ({sentiment_scores['neutral']:.1%}):</strong> Factual statements and objective descriptions.</p>
+                
+                <p><strong>Negative ({sentiment_scores['negative']:.1%}):</strong> Language expressing criticism or concerns.</p>
+                
+                <h4>Interpretation</h4>
+                <p>{"Very positive document with strong favorable sentiment." if compound >= 0.5 else "Moderately positive document with constructive tone." if compound >= 0.05 else "Very negative document with critical concerns." if compound <= -0.5 else "Moderately negative document." if compound <= -0.05 else "Neutral, objective document maintaining balanced tone."}</p>
+            </div>
+            """, unsafe_allow_html=True)
         
         # TAB 3: KEYWORDS
         with tab3:
@@ -627,9 +538,8 @@ if uploaded_file:
             
             st.markdown("""
             <div class="info-box">
-                <strong>Algorithm:</strong> TF-IDF (Term Frequency-Inverse Document Frequency)<br>
-                <strong>N-grams:</strong> 1-3 word combinations<br>
-                <strong>Purpose:</strong> Identify terms most characteristic of this document
+                <strong>Algorithm:</strong> TF-IDF<br>
+                <strong>N-grams:</strong> 1-3 word combinations
             </div>
             """, unsafe_allow_html=True)
             
@@ -640,22 +550,11 @@ if uploaded_file:
                     plt.close(fig_kw)
                 
                 st.markdown("---")
-                st.markdown("### Keyword Details")
-                
                 for i, (term, score) in enumerate(keywords, 1):
-                    if score > 0.5:
-                        importance = "🔥 Critical"
-                    elif score > 0.3:
-                        importance = "⭐ High"
-                    elif score > 0.15:
-                        importance = "📌 Moderate"
-                    else:
-                        importance = "📎 Minor"
-                    
-                    with st.expander(f"**{i}. {term}** • Score: `{score:.4f}` • {importance}"):
-                        st.markdown(f"**TF-IDF Score:** {score:.4f}")
+                    importance = "🔥 Critical" if score > 0.5 else "⭐ High" if score > 0.3 else "📌 Moderate"
+                    with st.expander(f"**{i}. {term}** • {score:.4f} • {importance}"):
+                        st.markdown(f"**Score:** {score:.4f}")
                         st.markdown(f"**Importance:** {importance}")
-                        st.markdown("This term is distinctive to this document compared to typical documents.")
             else:
                 st.info("No keywords extracted")
         
@@ -666,64 +565,41 @@ if uploaded_file:
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                st.markdown(f"""
-                <div class="stat-card">
-                    <div class="stat-value">{len(text):,}</div>
-                    <div class="stat-label">Characters</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-card"><div class="stat-value">{len(text):,}</div><div class="stat-label">Characters</div></div>', unsafe_allow_html=True)
             
             with col2:
-                st.markdown(f"""
-                <div class="stat-card">
-                    <div class="stat-value">{readability['total_words']:,}</div>
-                    <div class="stat-label">Words</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-card"><div class="stat-value">{readability["total_words"]:,}</div><div class="stat-label">Words</div></div>', unsafe_allow_html=True)
             
             with col3:
-                st.markdown(f"""
-                <div class="stat-card">
-                    <div class="stat-value">{readability['total_sentences']}</div>
-                    <div class="stat-label">Sentences</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-card"><div class="stat-value">{readability["total_sentences"]}</div><div class="stat-label">Sentences</div></div>', unsafe_allow_html=True)
             
             with col4:
-                st.markdown(f"""
-                <div class="stat-card">
-                    <div class="stat-value">{readability['unique_words']:,}</div>
-                    <div class="stat-label">Unique Words</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-card"><div class="stat-value">{readability["unique_words"]:,}</div><div class="stat-label">Unique Words</div></div>', unsafe_allow_html=True)
             
             st.markdown("---")
-            st.markdown("### Readability Metrics")
+            st.markdown("### Readability")
             
             col_r1, col_r2, col_r3 = st.columns(3)
             
             avg_len = readability['avg_sentence_length']
             
             with col_r1:
-                st.markdown("#### Sentence Complexity")
-                st.metric("Avg Length", f"{avg_len:.1f} words")
+                st.metric("Avg Sentence", f"{avg_len:.1f} words")
                 if avg_len < 15:
-                    st.caption("✅ Simple (Easy to read)")
+                    st.caption("✅ Simple")
                 elif avg_len < 25:
-                    st.caption("📖 Medium (Standard)")
+                    st.caption("📖 Medium")
                 else:
-                    st.caption("📚 Complex (Advanced)")
+                    st.caption("📚 Complex")
             
             with col_r2:
-                st.markdown("#### Vocabulary")
-                st.metric("Diversity", f"{readability['lexical_diversity']:.1%}")
-                st.caption(f"{readability['unique_words']:,} unique words")
+                st.metric("Vocabulary", f"{readability['lexical_diversity']:.1%}")
+                st.caption(f"{readability['unique_words']:,} unique")
             
             with col_r3:
-                st.markdown("#### Reading Time")
                 reading_time = readability['total_words'] / 200
-                st.metric("Estimated", f"{reading_time:.1f} min")
-                st.caption("At 200 words/min")
+                st.metric("Reading Time", f"{reading_time:.1f} min")
+                st.caption("At 200 wpm")
     
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
@@ -731,23 +607,21 @@ if uploaded_file:
             st.code(str(e))
 
 else:
-    st.info("👆 Upload a document to start analysis")
+    st.info("👆 Upload a document to start")
     
     st.markdown("""
     ### 🎯 Features
     
-    - **Advanced Summarization**: TF-IDF + MMR for optimal sentence selection
-    - **Sentiment Analysis**: VADER with detailed explanations
-    - **Keyword Extraction**: Multi-gram TF-IDF analysis
-    - **Document Statistics**: Comprehensive readability metrics
+    - **TextRank Summarization**: Graph-based algorithm for coherent summaries
+    - **Sentiment Analysis**: VADER for emotional tone detection
+    - **Keyword Extraction**: TF-IDF multi-gram analysis
+    - **Statistics**: Comprehensive readability metrics
     
     ### 📄 Supported Formats
     
-    - PDF (text-based)
-    - TXT (plain text)
-    - HTML (web pages)
+    PDF (text-based) • TXT • HTML
     
     ### ✅ Best For
     
-    Business reports • Research papers • Legal documents • News articles • Financial reports
+    Business reports • Research papers • Legal documents • News articles
     """)
