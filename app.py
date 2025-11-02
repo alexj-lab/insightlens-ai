@@ -9,8 +9,6 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
-import json
-from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -18,7 +16,6 @@ warnings.filterwarnings('ignore')
 MAX_CHARS = 50000
 MIN_SENTENCE_LENGTH = 20
 
-# Style matplotlib
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.size'] = 10
 plt.rcParams['figure.facecolor'] = 'white'
@@ -34,7 +31,7 @@ STOP_WORDS = set([
     "than", "too", "very", "just", "but", "or", "as", "at", "from", "into", "through"
 ])
 
-# CSS propre
+# CSS
 st.markdown("""
 <style>
     .main-header {
@@ -86,50 +83,6 @@ st.markdown("""
         border-radius: 4px;
         padding: 1rem 1.5rem;
         margin: 1.5rem 0;
-        color: #174ea6;
-    }
-    .sentiment-card {
-        background: #ffffff;
-        border: 1px solid #dadce0;
-        border-radius: 8px;
-        padding: 2rem;
-        margin: 1.5rem 0;
-        box-shadow: 0 1px 2px rgba(60,64,67,0.2);
-    }
-    .sentiment-card h3 {
-        color: #1a73e8;
-        margin-bottom: 1rem;
-    }
-    .sentiment-card h4 {
-        color: #5f6368;
-        margin-top: 1.5rem;
-        margin-bottom: 0.75rem;
-        font-size: 1.1rem;
-    }
-    .sentiment-card p {
-        color: #202124;
-        line-height: 1.7;
-        margin-bottom: 1rem;
-    }
-    .badge {
-        display: inline-block;
-        padding: 0.4rem 0.9rem;
-        border-radius: 16px;
-        font-size: 0.875rem;
-        font-weight: 600;
-        margin-left: 0.5rem;
-    }
-    .badge-positive {
-        background: #e6f4ea;
-        color: #137333;
-    }
-    .badge-neutral {
-        background: #f1f3f4;
-        color: #5f6368;
-    }
-    .badge-negative {
-        background: #fce8e6;
-        color: #c5221f;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -188,27 +141,22 @@ def read_any(path):
     
     return text
 
-# ========== CACHE ==========
 @st.cache_resource
 def load_sentiment_analyzer():
     return SentimentIntensityAnalyzer()
 
-# ========== ANALYSES ==========
 def split_sentences(text):
     sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
     return [s.strip() for s in sentences if len(s.strip()) >= MIN_SENTENCE_LENGTH]
 
-def textrank_summary_paragraph(text, num_sentences=12):
-    """
-    TextRank optimisé qui retourne un PARAGRAPHE fluide
-    """
+def optimized_summary(text, target_sentences=8):
+    """Résumé optimisé court et pertinent"""
     sentences = split_sentences(text)
     
-    if len(sentences) <= num_sentences:
+    if len(sentences) <= target_sentences:
         return " ".join(sentences)
     
     try:
-        # Vectorisation TF-IDF
         vectorizer = TfidfVectorizer(
             stop_words=list(STOP_WORDS),
             ngram_range=(1, 2),
@@ -216,44 +164,31 @@ def textrank_summary_paragraph(text, num_sentences=12):
         )
         
         X = vectorizer.fit_transform(sentences)
-        
-        # Matrice de similarité
         similarity_matrix = cosine_similarity(X)
         
-        # TextRank scores (PageRank sur graphe de similarité)
+        # TextRank scores
         scores = np.ones(len(sentences))
-        
-        # Itérations TextRank
-        for _ in range(20):
+        for _ in range(15):
             new_scores = np.zeros(len(sentences))
             for i in range(len(sentences)):
                 for j in range(len(sentences)):
-                    if i != j and similarity_matrix[i][j] > 0:
+                    if i != j and similarity_matrix[i][j] > 0.1:
                         new_scores[i] += similarity_matrix[i][j] * scores[j]
-            
             scores = 0.85 * new_scores + 0.15
-            scores = scores / np.linalg.norm(scores)
         
-        # Bonus position (début de doc)
-        position_bonus = np.array([1.0 - (i / len(sentences)) * 0.3 for i in range(len(sentences))])
+        # Position bonus
+        position_bonus = np.array([1.0 - (i / len(sentences)) * 0.4 for i in range(len(sentences))])
         scores = scores * position_bonus
         
-        # Sélectionner top phrases
-        top_indices = scores.argsort()[-num_sentences:][::-1]
-        
-        # IMPORTANT : Trier par ordre d'apparition pour cohérence
+        # Sélection diverse
+        top_indices = scores.argsort()[-target_sentences:][::-1]
         top_indices_sorted = sorted(top_indices)
         
-        selected_sentences = [sentences[i] for i in top_indices_sorted]
-        
-        # Assembler en paragraphe fluide avec transitions
-        paragraph = " ".join(selected_sentences)
-        
-        return paragraph
+        selected = [sentences[i] for i in top_indices_sorted]
+        return " ".join(selected)
     
-    except Exception as e:
-        # Fallback simple
-        return " ".join(sentences[:num_sentences])
+    except:
+        return " ".join(sentences[:target_sentences])
 
 def extract_keywords(text, top_n=15):
     paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if len(p.strip()) > 50]
@@ -296,8 +231,7 @@ def extract_keywords(text, top_n=15):
             except:
                 continue
         
-        sorted_pairs = sorted(pairs, key=lambda x: x[1], reverse=True)
-        return sorted_pairs[:top_n]
+        return sorted(pairs, key=lambda x: x[1], reverse=True)[:top_n]
     
     except:
         return []
@@ -335,14 +269,13 @@ def readability_metrics(text):
         'total_sentences': len(sentences)
     }
 
-# ========== VISUALISATIONS ==========
 def plot_sentiment(scores):
     labels = ['Positive', 'Neutral', 'Negative']
     values = [scores['positive'], scores['neutral'], scores['negative']]
     colors = ['#34a853', '#5f6368', '#ea4335']
     
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='white')
-    bars = ax.bar(labels, values, color=colors, width=0.5, edgecolor='none', alpha=0.9)
+    bars = ax.bar(labels, values, color=colors, width=0.5, alpha=0.9)
     
     for bar, val in zip(bars, values):
         height = bar.get_height()
@@ -356,8 +289,6 @@ def plot_sentiment(scores):
     
     for spine in ['top', 'right']:
         ax.spines[spine].set_visible(False)
-    for spine in ['left', 'bottom']:
-        ax.spines[spine].set_color('#dadce0')
     
     plt.tight_layout()
     return fig
@@ -370,7 +301,7 @@ def plot_keywords(pairs):
     scores = [s for _, s in pairs[:12]]
     
     fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
-    bars = ax.barh(range(len(terms)), scores, color='#1967d2', height=0.65, edgecolor='none')
+    bars = ax.barh(range(len(terms)), scores, color='#1967d2', height=0.65)
     
     for bar, score in zip(bars, scores):
         width = bar.get_width()
@@ -385,8 +316,6 @@ def plot_keywords(pairs):
     
     for spine in ['top', 'right']:
         ax.spines[spine].set_visible(False)
-    for spine in ['left', 'bottom']:
-        ax.spines[spine].set_color('#dadce0')
     
     plt.tight_layout()
     return fig
@@ -395,19 +324,18 @@ def plot_keywords(pairs):
 st.set_page_config(page_title="InsightLens AI Pro", page_icon="🔍", layout="wide")
 
 st.markdown('<p class="main-header">InsightLens AI Pro</p>', unsafe_allow_html=True)
-st.markdown('<p class="subtitle">Advanced Document Analysis with TextRank Summarization</p>', unsafe_allow_html=True)
+st.markdown('<p class="subtitle">Professional Document Analysis System</p>', unsafe_allow_html=True)
 st.markdown("---")
 
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
-    num_sentences = st.slider("Summary length", 8, 15, 12, help="Number of sentences")
     num_keywords = st.slider("Keywords", 8, 20, 12)
     
     st.markdown("---")
     st.markdown("### 🤖 AI Models")
-    st.caption("• TextRank (Graph-based)")
-    st.caption("• TF-IDF (Statistical)")
-    st.caption("• VADER (Sentiment)")
+    st.caption("• TextRank")
+    st.caption("• TF-IDF")
+    st.caption("• VADER")
 
 uploaded_file = st.file_uploader("📂 Upload Document", type=["pdf", "txt", "html", "htm"])
 
@@ -420,28 +348,25 @@ if uploaded_file:
         progress = st.progress(0)
         status = st.empty()
         
-        status.text("Reading document...")
+        status.text("Reading...")
         progress.progress(20)
         text = read_any(temp_path)
         
         words = text.split()
         if len(words) < 100:
-            st.error("❌ Document too short (minimum 100 words)")
+            st.error("❌ Document too short")
             st.stop()
         
         num_sent = len(split_sentences(text))
-        st.success(f"✅ **{uploaded_file.name}** • {len(words):,} words • {num_sent} sentences")
+        st.success(f"✅ **{uploaded_file.name}** • {len(words):,} words")
         
-        status.text("Generating summary with TextRank...")
+        status.text("Generating summary...")
         progress.progress(40)
-        summary = textrank_summary_paragraph(text, num_sentences=num_sentences)
+        summary = optimized_summary(text, target_sentences=8)
         
-        status.text("Analyzing sentiment...")
-        progress.progress(65)
+        status.text("Analyzing...")
+        progress.progress(70)
         sentiment_scores = analyze_sentiment(text)
-        
-        status.text("Extracting keywords...")
-        progress.progress(85)
         keywords = extract_keywords(text, top_n=num_keywords)
         readability = readability_metrics(text)
         
@@ -449,18 +374,15 @@ if uploaded_file:
         status.empty()
         progress.empty()
         
-        # ========== TABS ==========
         tab1, tab2, tab3, tab4 = st.tabs(["📋 Summary", "💭 Sentiment", "🔑 Keywords", "📊 Statistics"])
         
-        # TAB 1: SUMMARY
         with tab1:
             st.markdown("## Executive Summary")
             
             st.markdown("""
             <div class="info-box">
-                <strong>Algorithm:</strong> TextRank (Graph-based extractive summarization)<br>
-                <strong>Method:</strong> Selects most important sentences and assembles them in document order<br>
-                <strong>Quality:</strong> Professional, coherent, comprehensive
+                <strong>Algorithm:</strong> TextRank (Graph-based)<br>
+                <strong>Quality:</strong> Extracts 8 most important sentences
             </div>
             """, unsafe_allow_html=True)
             
@@ -469,29 +391,14 @@ if uploaded_file:
                 <div class="summary-text">{summary}</div>
             </div>
             """, unsafe_allow_html=True)
-            
-            st.markdown("---")
-            st.markdown("### How TextRank Works")
-            st.markdown("""
-            TextRank is inspired by Google's PageRank algorithm. It:
-            
-            1. **Builds a graph** where sentences are nodes
-            2. **Calculates similarity** between all sentence pairs
-            3. **Runs PageRank** to find most "central" sentences
-            4. **Selects top sentences** based on importance scores
-            5. **Orders them** by document position for coherence
-            
-            This creates a fluent, paragraph-style summary that captures key information.
-            """)
         
-        # TAB 2: SENTIMENT
         with tab2:
             st.markdown("## Sentiment Analysis")
             
             st.markdown("""
             <div class="info-box">
-                <strong>Model:</strong> VADER (Valence Aware Dictionary)<br>
-                <strong>Scale:</strong> -1 (very negative) to +1 (very positive)
+                <strong>Model:</strong> VADER<br>
+                <strong>Scale:</strong> -1 (negative) to +1 (positive)
             </div>
             """, unsafe_allow_html=True)
             
@@ -504,42 +411,40 @@ if uploaded_file:
             
             compound = sentiment_scores['compound']
             
+            # Utiliser st.markdown SANS unsafe_allow_html
             if compound >= 0.05:
-                badge = '<span class="badge badge-positive">POSITIVE</span>'
-                tone = "positive"
+                st.success("### Overall: POSITIVE ✅")
             elif compound <= -0.05:
-                badge = '<span class="badge badge-negative">NEGATIVE</span>'
-                tone = "negative"
+                st.error("### Overall: NEGATIVE ❌")
             else:
-                badge = '<span class="badge badge-neutral">NEUTRAL</span>'
-                tone = "neutral"
+                st.info("### Overall: NEUTRAL ➖")
             
-            st.markdown(f"""
-            <div class="sentiment-card">
-                <h3>Overall Assessment {badge}</h3>
-                <p><strong>Compound Score: {compound:.3f}</strong></p>
-                
-                <h4>Distribution Breakdown</h4>
-                
-                <p><strong>Positive ({sentiment_scores['positive']:.1%}):</strong> Language expressing favorable opinions or optimism.</p>
-                
-                <p><strong>Neutral ({sentiment_scores['neutral']:.1%}):</strong> Factual statements and objective descriptions.</p>
-                
-                <p><strong>Negative ({sentiment_scores['negative']:.1%}):</strong> Language expressing criticism or concerns.</p>
-                
-                <h4>Interpretation</h4>
-                <p>{"Very positive document with strong favorable sentiment." if compound >= 0.5 else "Moderately positive document with constructive tone." if compound >= 0.05 else "Very negative document with critical concerns." if compound <= -0.5 else "Moderately negative document." if compound <= -0.05 else "Neutral, objective document maintaining balanced tone."}</p>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"**Compound Score:** {compound:.3f}")
+            
+            st.markdown("#### Distribution")
+            st.markdown(f"- **Positive:** {sentiment_scores['positive']:.1%} - Favorable language")
+            st.markdown(f"- **Neutral:** {sentiment_scores['neutral']:.1%} - Factual statements")
+            st.markdown(f"- **Negative:** {sentiment_scores['negative']:.1%} - Critical language")
+            
+            st.markdown("#### Interpretation")
+            if compound >= 0.5:
+                st.markdown("**Very positive** document expressing strong favorable sentiment.")
+            elif compound >= 0.05:
+                st.markdown("**Moderately positive** document with constructive tone.")
+            elif compound <= -0.5:
+                st.markdown("**Very negative** document with critical concerns.")
+            elif compound <= -0.05:
+                st.markdown("**Moderately negative** document.")
+            else:
+                st.markdown("**Neutral** document maintaining objective tone.")
         
-        # TAB 3: KEYWORDS
         with tab3:
-            st.markdown("## Keywords & Phrases")
+            st.markdown("## Keywords")
             
             st.markdown("""
             <div class="info-box">
                 <strong>Algorithm:</strong> TF-IDF<br>
-                <strong>N-grams:</strong> 1-3 word combinations
+                <strong>N-grams:</strong> 1-3 words
             </div>
             """, unsafe_allow_html=True)
             
@@ -554,13 +459,11 @@ if uploaded_file:
                     importance = "🔥 Critical" if score > 0.5 else "⭐ High" if score > 0.3 else "📌 Moderate"
                     with st.expander(f"**{i}. {term}** • {score:.4f} • {importance}"):
                         st.markdown(f"**Score:** {score:.4f}")
-                        st.markdown(f"**Importance:** {importance}")
             else:
-                st.info("No keywords extracted")
+                st.info("No keywords")
         
-        # TAB 4: STATISTICS
         with tab4:
-            st.markdown("## Document Statistics")
+            st.markdown("## Statistics")
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -574,54 +477,14 @@ if uploaded_file:
                 st.markdown(f'<div class="stat-card"><div class="stat-value">{readability["total_sentences"]}</div><div class="stat-label">Sentences</div></div>', unsafe_allow_html=True)
             
             with col4:
-                st.markdown(f'<div class="stat-card"><div class="stat-value">{readability["unique_words"]:,}</div><div class="stat-label">Unique Words</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="stat-card"><div class="stat-value">{readability["unique_words"]:,}</div><div class="stat-label">Unique</div></div>', unsafe_allow_html=True)
             
             st.markdown("---")
-            st.markdown("### Readability")
             
             col_r1, col_r2, col_r3 = st.columns(3)
             
-            avg_len = readability['avg_sentence_length']
-            
             with col_r1:
-                st.metric("Avg Sentence", f"{avg_len:.1f} words")
-                if avg_len < 15:
-                    st.caption("✅ Simple")
-                elif avg_len < 25:
-                    st.caption("📖 Medium")
-                else:
-                    st.caption("📚 Complex")
+                st.metric("Avg Sentence", f"{readability['avg_sentence_length']:.1f} words")
             
             with col_r2:
-                st.metric("Vocabulary", f"{readability['lexical_diversity']:.1%}")
-                st.caption(f"{readability['unique_words']:,} unique")
-            
-            with col_r3:
-                reading_time = readability['total_words'] / 200
-                st.metric("Reading Time", f"{reading_time:.1f} min")
-                st.caption("At 200 wpm")
-    
-    except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
-        with st.expander("Debug"):
-            st.code(str(e))
-
-else:
-    st.info("👆 Upload a document to start")
-    
-    st.markdown("""
-    ### 🎯 Features
-    
-    - **TextRank Summarization**: Graph-based algorithm for coherent summaries
-    - **Sentiment Analysis**: VADER for emotional tone detection
-    - **Keyword Extraction**: TF-IDF multi-gram analysis
-    - **Statistics**: Comprehensive readability metrics
-    
-    ### 📄 Supported Formats
-    
-    PDF (text-based) • TXT • HTML
-    
-    ### ✅ Best For
-    
-    Business reports • Research papers • Legal documents • News articles
-    """)
+                st.
