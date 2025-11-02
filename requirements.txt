@@ -7,5 +7,7 @@ numpy
 vaderSentiment
 seaborn
 scipy
+transformers
+torch
 
 
