@@ -18,44 +18,32 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 APP_NAME = "InsightLens – AI Document Analyzer"
 MAX_CHARS = 50000
 MIN_SENTENCE_LENGTH = 20
-TOP_SENTENCES = 10          # on prend plus large avant réécriture
+TOP_SENTENCES = 10
 TOP_KEYWORDS = 15
 WPM = 200
 
 st.set_page_config(page_title="InsightLens", layout="wide", page_icon="🧾")
 
-# Clean corporate UI
+# Corporate UI with tabs
 st.markdown("""
 <style>
-:root {
-  --brand:#0F62FE;    /* deep blue */
-  --ink:#0f172a;      /* slate-900 */
-  --muted:#64748b;    /* slate-500 */
-  --card:#ffffff;
-  --bg:#f8fafc;       /* slate-50 */
-  --line:#e2e8f0;     /* slate-200 */
-  --accent:#22c55e;   /* green */
-  --warn:#f59e0b;     /* amber */
+:root{
+  --brand:#0F62FE; --ink:#0f172a; --muted:#64748b; --card:#ffffff;
+  --bg:#f8fafc; --line:#e2e8f0; --accent:#22c55e; --warn:#f59e0b;
 }
 html,body,[class*="block-container"]{ background:var(--bg); color:var(--ink); }
-h1,h2,h3{ letter-spacing:.2px; }
-.card{
-  background:var(--card); border:1px solid var(--line);
-  border-radius:14px; padding:18px 20px; box-shadow:0 1px 2px rgba(2,6,23,.06);
-}
-.kpi{
-  background:var(--card); border:1px solid var(--line);
-  border-radius:12px; padding:14px; text-align:center;
-}
+h1,h2,h3{ letter-spacing:.2px }
+.card{ background:var(--card); border:1px solid var(--line); border-radius:14px;
+  padding:18px 20px; box-shadow:0 1px 2px rgba(2,6,23,.06); }
+.kpi{ background:var(--card); border:1px solid var(--line); border-radius:12px;
+  padding:14px; text-align:center; }
 .kpi .v{ font-size:1.25rem; font-weight:700; color:var(--brand); }
 .kpi .l{ font-size:.85rem; color:var(--muted); }
-.badge{
-  display:inline-block; padding:4px 10px; border-radius:999px;
-  font-size:.8rem; border:1px solid var(--line); background:#fff;
-}
-.summary-paragraph{ line-height:1.7; font-size:1.02rem; color:#0b1220; }
-.mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
-hr{ border:0; border-top:1px solid var(--line); margin: 8px 0 16px 0; }
+.badge{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:.8rem;
+  border:1px solid var(--line); background:#fff; }
+.small{ color:var(--muted); font-size:.9rem }
+.summary{ line-height:1.7; font-size:1.02rem; color:#0b1220; }
+hr{ border:0; border-top:1px solid var(--line); margin:8px 0 16px 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -129,16 +117,12 @@ def read_any(path: str) -> str:
     return t
 
 # ─────────────────────────────────────────────────────────────
-# NLP utilities (segmentation / quality / scoring / MMR / rewrite)
+# Summarization utilities
 # ─────────────────────────────────────────────────────────────
 BULLET_PAT = re.compile(r'^\s*[\-\•\–\*]\s+')
-
-# motifs de titres/sections/metadata fréquents
-HEADING_PAT = re.compile(
-    r'^(part|section|phase|case|role|assessment|glossary|timeline|procedure|ready|status|students|team|judgment|simulation)\b',
-    re.IGNORECASE
-)
+HEADING_PAT = re.compile(r'^(part|section|phase|case|role|assessment|glossary|timeline|procedure|status|students|team|judgment|simulation)\b', re.IGNORECASE)
 ALL_CAPS_WORDS = re.compile(r'^[A-Z0-9\W]+$')
+QUOTEY = re.compile(r'^“.*”$|^".*"$')
 
 def is_heading_like(line: str) -> bool:
     if not line: return False
@@ -147,28 +131,23 @@ def is_heading_like(line: str) -> bool:
     if s.endswith(':'): return True
     if BULLET_PAT.match(s): return True
     if HEADING_PAT.match(s): return True
-    # ratio de majuscules élevé → suspect
     letters = re.sub(r'[^A-Za-zÀ-ÖØ-öø-ÿ]', '', s)
     if letters:
         up = sum(c.isupper() for c in letters) / max(len(letters),1)
         if up > 0.65: return True
-    # beaucoup de termes courts en MAJ → suspect
     tokens = s.split()
-    if len(tokens) <= 6 and all(ALL_CAPS_WORDS.match(t) for t in tokens):
-        return True
+    if len(tokens) <= 6 and all(ALL_CAPS_WORDS.match(t) for t in tokens): return True
     return False
 
-VERB_HINT = re.compile(r'\b(is|are|was|were|be|been|being|has|have|had|do|does|did|will|would|should|could|may|might|must|can|invest|argue|claim|decide|deliver|terminate|classify|apply|protect|provide|purchase|sell|own|hire|train|open|approve|award|calculate)\b', re.IGNORECASE)
+VERB_HINT = re.compile(r'\b(is|are|was|were|be|been|being|has|have|had|do|does|did|will|would|should|could|may|might|must|can|invest|argue|claim|decide|deliver|terminate|classify|apply|protect|provide|purchase|sell|own|hire|open|approve|award|calculate|seek|grant|notice|compensate|represent)\b', re.IGNORECASE)
 
 def sentence_quality(s: str) -> float:
-    """Score simple: phrases verbales et informatives > titres/énumérations."""
     q = 0.0
-    if VERB_HINT.search(s): q += 1.0           # présence d’un verbe courant
-    if len(s) > 60: q += 0.4                   # longueur minimale informative
-    if not is_heading_like(s): q += 0.8        # pas un heading
-    # pénalités
-    if s.count(' – ') + s.count(' - ') > 2: q -= 0.2
+    if VERB_HINT.search(s): q += 1.0
+    if len(s) > 60: q += 0.4
+    if not is_heading_like(s): q += 0.8
     if s.endswith(':'): q -= 0.5
+    if QUOTEY.match(s): q -= 0.4
     return q
 
 def split_sentences(text: str):
@@ -177,27 +156,24 @@ def split_sentences(text: str):
     for ln in lines:
         if is_heading_like(ln):
             if buf: parts.append(" ".join(buf)); buf = []
-            continue  # on jette les titres purs
+            continue
         else:
             buf.append(ln)
     if buf: parts.append(" ".join(buf))
 
     sents = []
     for p in parts:
-        # découpe “phrases”
         chunks = re.split(r'(?<=[\.\!\?])\s+(?=[A-ZÉÈÊÀÂÎÔÛÇ])', p)
         for c in chunks:
             c = c.strip()
-            if not c: continue
-            if len(c) >= MIN_SENTENCE_LENGTH and not is_heading_like(c):
+            if c and len(c) >= MIN_SENTENCE_LENGTH and not is_heading_like(c):
                 sents.append(c)
 
-    # dédoublonnage
     seen, clean = set(), []
     for s in sents:
-        key = s.lower()
-        if key not in seen:
-            seen.add(key); clean.append(s)
+        k = s.lower()
+        if k not in seen:
+            seen.add(k); clean.append(s)
     return clean
 
 def title_from_text(text: str) -> str:
@@ -211,18 +187,15 @@ def build_tfidf(sentences, max_features=12000):
     X = vect.fit_transform(sentences)
     return vect, X
 
-def sentence_position_bonus(n_sent, idx):
-    return 1.0 - 0.35 * (idx / max(n_sent-1,1))
+def sentence_position_bonus(n_sent, idx): return 1.0 - 0.35 * (idx / max(n_sent-1,1))
 
 def mmr_select(X, k, diversity=0.7):
     sim = cosine_similarity(X)
     X_max = X.max(axis=1)
     rel = X_max.toarray().ravel() if hasattr(X_max, "toarray") else np.array(X_max).ravel()
     n = sim.shape[0]
-    selected = []
-    first = int(rel.argmax())
-    selected.append(first)
-    cand = set(range(n)) - {first}
+    selected = [int(rel.argmax())]
+    cand = set(range(n)) - set(selected)
     while len(selected) < min(k, n) and cand:
         best, best_val = None, -1e9
         for i in cand:
@@ -245,18 +218,13 @@ def rewrite_sentence(s: str) -> str:
     return x
 
 def summarize_bullets(text: str, target_sentences=TOP_SENTENCES):
-    sents_all = split_sentences(text)
-    # filtre qualité
-    sents = [s for s in sents_all if sentence_quality(s) >= 1.2]
-    if not sents:
-        sents = sents_all[:max(5, target_sentences)]
-
-    if len(sents) <= target_sentences:
-        return [rewrite_sentence(s) for s in sents]
+    s_all = split_sentences(text)
+    sents = [s for s in s_all if sentence_quality(s) >= 1.2]
+    if not sents: sents = s_all[:max(6, target_sentences)]
+    if len(sents) <= target_sentences: return [rewrite_sentence(s) for s in sents]
 
     title = title_from_text(text)
     vect, X = build_tfidf(sents, max_features=12000)
-
     X_max = X.max(axis=1)
     centrality = X_max.toarray().ravel() if hasattr(X_max, "toarray") else np.array(X_max).ravel()
 
@@ -270,14 +238,12 @@ def summarize_bullets(text: str, target_sentences=TOP_SENTENCES):
 
     pos_bonus = np.array([sentence_position_bonus(len(sents), i) for i in range(len(sents))], dtype=float)
     qual_bonus = np.array([sentence_quality(s) for s in sents], dtype=float) * 0.15
-
     score = 0.55*centrality + 0.20*pos_bonus + 0.10*title_sim + 0.15*qual_bonus
 
     X_bias = X.multiply(score.reshape(-1,1))
     keep = mmr_select(X_bias, k=target_sentences, diversity=0.7)
     chosen = [rewrite_sentence(sents[i]) for i in keep]
 
-    # dédupe + 6 bullets max pour nourrir le paragraphe
     out, seen = [], set()
     for b in chosen:
         k = b.lower()
@@ -290,13 +256,10 @@ def summarize_bullets(text: str, target_sentences=TOP_SENTENCES):
 
 def bullets_to_paragraph(bullets):
     if not bullets: return ""
-    # retirer point final pour concaténer proprement
     cleaned = [re.sub(r'[ \t]*\.$', '', b).strip() for b in bullets]
-    # éviter les restes de titres
     cleaned = [c for c in cleaned if not is_heading_like(c)]
     if not cleaned:
-        return "This document presents the main facts, issues, evidence, and procedure, providing a structured overview for readers."
-
+        return "This document presents the main facts, legal issues, evidence, and procedure in a coherent overview."
     lead = "This document discusses "
     conns = [" It then explains", " Additionally,", " Moreover,", " Finally,"]
     parts = [lead + cleaned[0].lstrip("-.• ")]
@@ -307,95 +270,64 @@ def bullets_to_paragraph(bullets):
     return para
 
 # ─────────────────────────────────────────────────────────────
-# Keywords
+# Keywords, Sentiment, Stats
 # ─────────────────────────────────────────────────────────────
 def extract_keywords(text: str, top_n=TOP_KEYWORDS):
     paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if len(p.strip()) > 60]
     if len(paragraphs) < 2:
-        chunk_size = 600
-        paragraphs = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+        chunk = 600
+        paragraphs = [text[i:i+chunk] for i in range(0, len(text), chunk)]
     if not paragraphs: paragraphs = [text]
-
     vect = TfidfVectorizer(stop_words=list(STOP_WORDS), ngram_range=(1,3), max_features=6000, min_df=1, max_df=0.85)
     X = vect.fit_transform(paragraphs)
     if X.shape[1] == 0: return []
-
-    if isinstance(X, (coo_matrix, csr_matrix)): Xd = X.toarray()
-    else: Xd = np.array(X)
-    scores = Xd.max(axis=0)
-    if len(scores.shape) > 1: scores = scores.flatten()
-
+    Xd = X.toarray() if isinstance(X, (coo_matrix, csr_matrix)) else np.array(X)
+    scores = Xd.max(axis=0); scores = scores.flatten() if len(scores.shape)>1 else scores
     terms = vect.get_feature_names_out()
-    pairs = list(zip(terms, scores.tolist()))
-
-    def ok(term):
-        if len(term) < 3: return False
-        if re.fullmatch(r'[\W_]+', term): return False
-        if re.fullmatch(r'\d+(\.\d+)?', term): return False
-        return True
-
-    pairs = [(t, float(s)) for t, s in pairs if ok(t)]
+    pairs = [(t, float(s)) for t, s in zip(terms, scores) if len(t)>=3 and not re.fullmatch(r'[\W_]+', t) and not re.fullmatch(r'\d+(\.\d+)?', t)]
     pairs.sort(key=lambda x: x[1], reverse=True)
-
-    chosen, seen = [], set()
+    out, seen = [], set()
     for t, s in pairs:
         low = t.lower()
         if any(low in k or k in low for k in seen): continue
-        seen.add(low); chosen.append((t, s))
-        if len(chosen) >= top_n: break
-    return chosen
+        seen.add(low); out.append((t, s))
+        if len(out) >= top_n: break
+    return out
 
-# ─────────────────────────────────────────────────────────────
-# Sentiment + explanation
-# ─────────────────────────────────────────────────────────────
 @st.cache_resource
-def load_sentiment_analyzer():
-    return SentimentIntensityAnalyzer()
+def load_sentiment_analyzer(): return SentimentIntensityAnalyzer()
 
 def text_stats(text: str):
     words = re.findall(r"\b\w+\b", text)
-    wc = len(words)
-    cc = len(text)
+    wc = len(words); cc = len(text)
     paras = len([p for p in re.split(r"\n{2,}", text) if p.strip()])
-    minutes = wc / WPM
-    mm = int(minutes); ss = int((minutes - mm) * 60)
+    minutes = wc / WPM; mm = int(minutes); ss = int((minutes - mm) * 60)
     rt = f"{mm}m{ss:02d}s" if mm > 0 else f"{ss}s"
     return {"words": wc, "chars": cc, "paragraphs": paras, "reading_time": rt}
 
 def sentiment_scores(text: str):
-    a = load_sentiment_analyzer()
-    s = a.polarity_scores(text[:6000])
-    pos = max(0.0, s.get("pos",0.0))
-    neu = max(0.0, s.get("neu",0.0))
-    neg = max(0.0, s.get("neg",0.0))
+    a = load_sentiment_analyzer(); s = a.polarity_scores(text[:6000])
+    pos, neu, neg = max(0.0, s.get("pos",0.0)), max(0.0, s.get("neu",0.0)), max(0.0, s.get("neg",0.0))
     total = pos+neu+neg or 1.0
     return {"positive": pos/total, "neutral": neu/total, "negative": neg/total, "compound": s.get("compound",0.0)}
 
 def sentiment_explanation(text: str, max_words=6, max_sents=2):
-    a = load_sentiment_analyzer()
-    lex = a.lexicon
-    tokens = re.findall(r"\b[\w'-]+\b", text.lower())
-    freq = {}
+    a = load_sentiment_analyzer(); lex = a.lexicon
+    tokens = re.findall(r"\b[\w'-]+\b", text.lower()); freq = {}
     for t in tokens:
         if t in STOP_WORDS: continue
         freq[t] = freq.get(t, 0) + 1
-
     pos_w, neg_w = [], []
     for tok, n in freq.items():
         if tok in lex:
-            val = lex[tok] * n
-            if val > 0: pos_w.append((tok, val))
-            elif val < 0: neg_w.append((tok, -val))
-    pos_w.sort(key=lambda x: x[1], reverse=True)
-    neg_w.sort(key=lambda x: x[1], reverse=True)
-    pos_words = [t for t,_ in pos_w[:max_words]]
-    neg_words = [t for t,_ in neg_w[:max_words]]
-
-    sents = split_sentences(text)
-    scored = [(s, a.polarity_scores(s).get("compound",0.0)) for s in sents]
+            val = lex[tok]*n
+            if val>0: pos_w.append((tok,val))
+            elif val<0: neg_w.append((tok,-val))
+    pos_w.sort(key=lambda x:x[1], reverse=True); neg_w.sort(key=lambda x:x[1], reverse=True)
+    pos_words = [t for t,_ in pos_w[:max_words]]; neg_words = [t for t,_ in neg_w[:max_words]]
+    sents = split_sentences(text); scored = [(s, a.polarity_scores(s).get("compound",0.0)) for s in sents]
     top_pos = [s for s,_ in sorted(scored, key=lambda x:x[1], reverse=True)[:max_sents]]
     top_neg = [s for s,_ in sorted(scored, key=lambda x:x[1])[:max_sents]]
-
     return {"pos_words": pos_words, "neg_words": neg_words, "top_pos_sents": top_pos, "top_neg_sents": top_neg}
 
 # ─────────────────────────────────────────────────────────────
@@ -403,24 +335,13 @@ def sentiment_explanation(text: str, max_words=6, max_sents=2):
 # ─────────────────────────────────────────────────────────────
 def fig_keywords(pairs):
     if not pairs:
-        fig = plt.figure(figsize=(6,3))
-        plt.text(0.5,0.5,"No keywords", ha="center", va="center"); plt.axis("off")
-        return fig
-    terms = [t for t,_ in pairs[:15]]
-    vals = [v for _,v in pairs[:15]]
-    fig = plt.figure(figsize=(6.6,3.6))
-    plt.barh(terms[::-1], vals[::-1])
-    plt.xlabel("TF-IDF (max per segment)")
-    plt.tight_layout()
-    return fig
+        fig = plt.figure(figsize=(6,3)); plt.text(0.5,0.5,"No keywords", ha="center", va="center"); plt.axis("off"); return fig
+    terms = [t for t,_ in pairs[:15]]; vals = [v for _,v in pairs[:15]]
+    fig = plt.figure(figsize=(6.6,3.6)); plt.barh(terms[::-1], vals[::-1]); plt.xlabel("TF-IDF (max per segment)"); plt.tight_layout(); return fig
 
 def fig_sentiment(scores):
-    labels = ["positive","neutral","negative"]
-    vals = [scores.get("positive",0), scores.get("neutral",0), scores.get("negative",0)]
-    fig = plt.figure(figsize=(4.2,3.2))
-    plt.bar(labels, vals)
-    plt.ylim(0,1); plt.ylabel("Share"); plt.tight_layout()
-    return fig
+    labels = ["positive","neutral","negative"]; vals = [scores.get("positive",0), scores.get("neutral",0), scores.get("negative",0)]
+    fig = plt.figure(figsize=(4.2,3.2)); plt.bar(labels, vals); plt.ylim(0,1); plt.ylabel("Share"); plt.tight_layout(); return fig
 
 # ─────────────────────────────────────────────────────────────
 # Export
@@ -430,28 +351,21 @@ def save_json_md(base_dir: str, payload: dict, paragraph: str, keywords: list):
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     jpath = os.path.join(base_dir, f"{run_id}.json")
     mpath = os.path.join(base_dir, f"{run_id}.md")
-    with open(jpath, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
+    with open(jpath, "w", encoding="utf-8") as f: json.dump(payload, f, indent=2, ensure_ascii=False)
     md = [
         "# InsightLens Report",
         f"Date (UTC): {payload['meta']['timestamp']}",
         f"Characters: {payload['meta']['chars']}",
         f"Words: {payload['meta']['words']}",
         f"Reading time: {payload['meta']['reading_time']}",
-        "",
-        "## Summary (paragraph)",
-        paragraph if paragraph else "(empty)",
-        "",
-        "## Top Keywords",
-        ", ".join([t for t,_ in keywords]) if keywords else "(none)",
-        ""
+        "", "## Summary (paragraph)", paragraph if paragraph else "(empty)", "",
+        "## Top Keywords", ", ".join([t for t,_ in keywords]) if keywords else "(none)", ""
     ]
-    with open(mpath, "w", encoding="utf-8") as f:
-        f.write("\n".join(md))
+    with open(mpath, "w", encoding="utf-8") as f: f.write("\n".join(md))
     return jpath, mpath
 
 # ─────────────────────────────────────────────────────────────
-# App layout
+# App with tabs
 # ─────────────────────────────────────────────────────────────
 st.title("🧾 " + APP_NAME)
 st.caption("Upload a PDF / TXT / HTML. Get an executive one-paragraph summary, sentiment with explanations, keywords, and reading stats.")
@@ -461,88 +375,95 @@ with st.sidebar:
     kwords = st.slider("Number of keywords", 5, 30, TOP_KEYWORDS)
     st.caption("Tip: TXT/HTML are fastest. For PDFs, prefer text-based (not scanned).")
 
-upload = st.file_uploader("Upload document", type=["pdf","txt","html","htm"])
-main, side = st.columns([2,1], gap="large")
+upl = st.file_uploader("Upload document", type=["pdf","txt","html","htm"])
 
-if upload:
-    tmp = f"/tmp/{upload.name}"
-    with open(tmp, "wb") as f: f.write(upload.read())
+if not upl:
+    st.info("Drop a PDF / TXT / HTML file to start. For best results, prefer text-based PDFs (not scanned images).")
+else:
+    tmp = f"/tmp/{upl.name}"; open(tmp, "wb").write(upl.read())
     text = read_any(tmp)
     if len(text.strip()) < 200:
         st.error("This file seems empty, scanned, or too short. Please use a text-based PDF or a .txt/.html file.")
         st.stop()
 
     stats = text_stats(text)
-    st.caption(f"Loaded {len(text)} characters")
-
     with st.spinner("Analyzing document..."):
         bullets = summarize_bullets(text, target_sentences=TOP_SENTENCES)
         if not bullets:
-            raw_sents = split_sentences(text)[:6]
-            bullets = [rewrite_sentence(s) for s in raw_sents] if raw_sents else ["This document provides an overview of the topic with key facts, arguments and evidence."]
+            raw = split_sentences(text)[:6]
+            bullets = [rewrite_sentence(s) for s in raw] if raw else ["This document presents the main facts, issues, evidence, and procedure."]
         paragraph = bullets_to_paragraph(bullets)
         if not paragraph.strip():
-            paragraph = "This document presents the main facts, legal issues, evidence, and procedure, and provides a coherent overview for readers."
+            paragraph = "This document presents the main facts, legal issues, evidence, and procedure in a coherent overview."
         senti = sentiment_scores(text)
         senti_expl = sentiment_explanation(text, max_words=6, max_sents=2)
         keywords = extract_keywords(text, top_n=kwords)
 
-    # KPIs
-    k1, k2, k3, k4 = st.columns(4)
-    k1.markdown(f'<div class="kpi"><div class="v">{stats["words"]:,}</div><div class="l">words</div></div>', unsafe_allow_html=True)
-    k2.markdown(f'<div class="kpi"><div class="v">{stats["chars"]:,}</div><div class="l">characters</div></div>', unsafe_allow_html=True)
-    k3.markdown(f'<div class="kpi"><div class="v">{stats["paragraphs"]}</div><div class="l">paragraphs</div></div>', unsafe_allow_html=True)
-    k4.markdown(f'<div class="kpi"><div class="v">{stats["reading_time"]}</div><div class="l">reading time</div></div>', unsafe_allow_html=True)
+    t1, t2, t3, t4, t5, t6 = st.tabs(["Overview", "Summary", "Sentiment & Tone", "Keywords & Topics", "Document Stats", "Key Evidence"])
 
-    with main:
+    with t1:
+        st.markdown("**What this page does**")
+        st.markdown('<div class="card small">Upload a document and get a clean executive summary, tone analysis, keywords, and quick reading stats. Use the tabs to navigate and export results from the footer.</div>', unsafe_allow_html=True)
+        st.markdown("**How the summary works**")
+        st.markdown('<div class="card small">We ignore headings, section labels, and list items. We score sentences by importance (TF-IDF), early position, similarity to the title, and linguistic quality (presence of a verb). Then we remove redundancies and rewrite the selection into one cohesive paragraph.</div>', unsafe_allow_html=True)
+
+    with t2:
         st.subheader("Executive Summary")
-        st.markdown(f'<div class="card summary-paragraph">{paragraph}</div>', unsafe_allow_html=True)
-
-        st.subheader("Top Keywords")
+        st.markdown(f'<div class="card summary">{paragraph}</div>', unsafe_allow_html=True)
+        st.caption("Tip: Copy-paste this paragraph into your deck or memo.")
+        st.markdown("**Bullet view (optional)**")
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.pyplot(fig_keywords(keywords))
+        for b in bullets: st.write("• " + b)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    with side:
+    with t3:
         st.subheader("Overall Sentiment")
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.pyplot(fig_sentiment(senti))
+        fig = plt.figure(figsize=(4.2,3.2)); labels=["positive","neutral","negative"]; vals=[senti.get("positive",0), senti.get("neutral",0), senti.get("negative",0)]
+        plt.bar(labels, vals); plt.ylim(0,1); plt.ylabel("Share"); plt.tight_layout(); st.pyplot(fig)
         label = "Positive" if senti["compound"] >= 0.2 else "Negative" if senti["compound"] <= -0.2 else "Neutral"
         st.markdown(f'<span class="badge">Overall: <b>{label}</b> (compound={senti["compound"]:.3f})</span>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-        st.subheader("Why this sentiment?")
-        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown("**Why this tone?**")
+        st.markdown('<div class="card small">', unsafe_allow_html=True)
         st.markdown("**Positive drivers:** " + (", ".join(senti_expl["pos_words"]) if senti_expl["pos_words"] else "_none detected_"))
         st.markdown("**Negative drivers:** " + (", ".join(senti_expl["neg_words"]) if senti_expl["neg_words"] else "_none detected_"))
-        if senti_expl["top_pos_sents"]:
-            st.markdown("**Positive evidence:**")
-            for s in senti_expl["top_pos_sents"]:
-                st.markdown(f"- {s}")
-        if senti_expl["top_neg_sents"]:
-            st.markdown("**Negative evidence:**")
-            for s in senti_expl["top_neg_sents"]:
-                st.markdown(f"- {s}")
+        if senti_expl["top_pos_sents"]: st.markdown("**Positive evidence:**\n- " + "\n- ".join(senti_expl["top_pos_sents"]))
+        if senti_expl["top_neg_sents"]: st.markdown("**Negative evidence:**\n- " + "\n- ".join(senti_expl["top_neg_sents"]))
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # Export
+    with t4:
+        st.subheader("Top Keywords")
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        if keywords:
+            terms = [t for t,_ in keywords[:15]]; vals = [v for _,v in keywords[:15]]
+            fig2 = plt.figure(figsize=(6.6,3.6)); plt.barh(terms[::-1], vals[::-1]); plt.xlabel("TF-IDF (max per segment)"); plt.tight_layout(); st.pyplot(fig2)
+        else:
+            st.write("_No keywords detected._")
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.caption("How to read: higher bars = terms that best differentiate segments of your document.")
+
+    with t5:
+        st.subheader("Document Stats")
+        c1,c2,c3,c4 = st.columns(4)
+        c1.markdown(f'<div class="kpi"><div class="v">{stats["words"]:,}</div><div class="l">words</div></div>', unsafe_allow_html=True)
+        c2.markdown(f'<div class="kpi"><div class="v">{stats["chars"]:,}</div><div class="l">characters</div></div>', unsafe_allow_html=True)
+        c3.markdown(f'<div class="kpi"><div class="v">{stats["paragraphs"]}</div><div class="l">paragraphs</div></div>', unsafe_allow_html=True)
+        c4.markdown(f'<div class="kpi"><div class="v">{stats["reading_time"]}</div><div class="l">reading time</div></div>', unsafe_allow_html=True)
+        st.caption("Estimate: ~200 words/minute. Use this to plan reading or presentation time.")
+
+    with t6:
+        st.subheader("Top central sentences")
+        st.markdown('<div class="card small">These are the most informative sentences by TF-IDF centrality (useful to verify the summary quickly).</div>', unsafe_allow_html=True)
+        # show up to 10 input sentences used for summary selection
+        base = split_sentences(text)[:400]
+        st.write("\n".join([f"- {s}" for s in base[:10]]))
+
     payload = {
-        "meta": {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "chars": len(text),
-            "words": stats["words"],
-            "reading_time": stats["reading_time"],
-            "top_sentences": TOP_SENTENCES,
-            "top_keywords": kwords
-        },
-        "summary_paragraph": paragraph,
-        "summary_bullets": bullets,
-        "sentiment": senti,
-        "sentiment_explanation": senti_expl,
-        "keywords": keywords
+        "meta": {"timestamp": datetime.utcnow().isoformat()+"Z", "chars": len(text), "words": stats["words"], "reading_time": stats["reading_time"], "top_sentences": TOP_SENTENCES, "top_keywords": kwords},
+        "summary_paragraph": paragraph, "summary_bullets": bullets,
+        "sentiment": senti, "sentiment_explanation": senti_expl, "keywords": keywords
     }
     jpath, mpath = save_json_md("outputs", payload, paragraph, keywords)
-    st.caption(f"Saved reports: {jpath}  ·  {mpath}")
-
-else:
-    st.info("Drop a PDF / TXT / HTML file to start. For best results, prefer text-based PDFs (not scanned images).")
+    st.caption(f"Saved reports: {jpath} · {mpath}")
