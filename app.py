@@ -7,12 +7,13 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import matplotlib.pyplot as plt
 import numpy as np
-from collections import Counter
+from scipy.sparse import coo_matrix, csr_matrix
 import json
 from datetime import datetime
 
 MAX_CHARS = 50000
 MIN_SENTENCE_LENGTH = 20
+MAX_SUMMARY_CHAR = 150  # Limite par bullet point
 
 STOP_WORDS = set([
     "the", "and", "of", "to", "in", "for", "on", "with", "a", "an", "by", "is", "are",
@@ -86,10 +87,15 @@ def split_sentences(text):
     return [s.strip() for s in sentences if len(s.strip()) >= MIN_SENTENCE_LENGTH]
 
 def advanced_summarize(text, max_sent=5):
+    """Résumé extractif avec limitation de longueur"""
     sentences = split_sentences(text)
     
+    if len(sentences) == 0:
+        return []
+    
     if len(sentences) <= max_sent:
-        return sentences
+        # Tronquer les phrases longues
+        return [s[:MAX_SUMMARY_CHAR] + "..." if len(s) > MAX_SUMMARY_CHAR else s for s in sentences]
     
     try:
         vectorizer = TfidfVectorizer(
@@ -108,11 +114,17 @@ def advanced_summarize(text, max_sent=5):
         top_indices = combined_scores.argsort()[-max_sent:][::-1]
         top_indices_sorted = sorted(top_indices)
         
-        return [sentences[i] for i in top_indices_sorted]
-    except:
-        return sentences[:max_sent]
+        # Récupérer et tronquer les phrases
+        summary_sentences = [sentences[i] for i in top_indices_sorted]
+        
+        # Tronquer si trop long
+        return [s[:MAX_SUMMARY_CHAR] + "..." if len(s) > MAX_SUMMARY_CHAR else s for s in summary_sentences]
+    
+    except Exception as e:
+        return [s[:MAX_SUMMARY_CHAR] + "..." if len(s) > MAX_SUMMARY_CHAR else s for s in sentences[:max_sent]]
 
 def extract_keywords(text, top_n=15):
+    """FIX CRITIQUE : Gestion correcte des sparse matrices"""
     paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if len(p.strip()) > 50]
     
     if len(paragraphs) < 2:
@@ -132,21 +144,38 @@ def extract_keywords(text, top_n=15):
         )
         
         X = vectorizer.fit_transform(paragraphs)
-        scores_matrix = X.max(axis=0)
-        scores_array = np.array(scores_matrix).flatten()
+        
+        # FIX : Convertir sparse matrix → dense array proprement
+        if isinstance(X, (coo_matrix, csr_matrix)):
+            X_dense = X.toarray()
+        else:
+            X_dense = np.array(X)
+        
+        # Calculer max par colonne (terme)
+        scores_array = X_dense.max(axis=0)
+        
+        # S'assurer que c'est un array 1D
+        if len(scores_array.shape) > 1:
+            scores_array = scores_array.flatten()
+        
         terms_array = vectorizer.get_feature_names_out()
         
-        # Créer liste explicite
+        # Créer liste de tuples avec conversion explicite
         pairs = []
-        for term, score in zip(terms_array, scores_array):
-            if len(str(term)) > 2:
-                pairs.append((str(term), float(score)))
+        for i, term in enumerate(terms_array):
+            try:
+                score = float(scores_array[i])
+                if len(str(term)) > 2 and score > 0:
+                    pairs.append((str(term), score))
+            except (ValueError, TypeError, IndexError):
+                continue
         
+        # Trier
         sorted_pairs = sorted(pairs, key=lambda x: x[1], reverse=True)
         return sorted_pairs[:top_n]
     
     except Exception as e:
-        st.warning(f"Keyword extraction failed: {e}")
+        st.warning(f"Keywords extraction failed: {str(e)}")
         return []
 
 def analyze_sentiment(text):
@@ -168,19 +197,29 @@ def analyze_sentiment(text):
         return {'positive': 0, 'neutral': 1, 'negative': 0, 'compound': 0}
 
 def extract_entities(text):
+    """FIX : Regex améliorés pour meilleurs résultats"""
     entities = {}
     
-    money_matches = re.findall(r'\$?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:million|billion|M|B|bn))?\b', text, re.I)
-    if money_matches:
-        entities['monetary_values'] = money_matches[:10]
+    # Montants : améliorer la détection
+    money_pattern = r'(?:€|USD|\$|EUR)\s*\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})?|\d{1,3}(?:[,\s]\d{3})*(?:\.\d{2})?\s*(?:€|EUR|USD|\$|million|billion|M|B|bn|mn)'
+    money_matches = re.findall(money_pattern, text, re.I)
     
-    percent_matches = re.findall(r'\d+(?:\.\d+)?%', text)
+    # Filtrer les faux positifs (pas juste "51" ou "1")
+    valid_money = [m for m in money_matches if re.search(r'[€$]|million|billion|EUR|USD|[MB](?:n)?$', m, re.I)]
+    
+    if valid_money:
+        entities['monetary_values'] = list(set(valid_money))[:10]
+    
+    # Pourcentages
+    percent_matches = re.findall(r'\b\d+(?:\.\d+)?%', text)
     if percent_matches:
-        entities['percentages'] = percent_matches[:10]
+        entities['percentages'] = list(set(percent_matches))[:10]
     
-    year_matches = re.findall(r'\b(19|20)\d{2}\b', text)
-    if year_matches:
-        entities['years'] = list(set(year_matches))[:10]
+    # Dates complètes (plus utile que juste années)
+    date_pattern = r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{4}'
+    date_matches = re.findall(date_pattern, text, re.I)
+    if date_matches:
+        entities['dates'] = list(set(date_matches))[:10]
     
     return entities
 
@@ -188,17 +227,17 @@ def plot_keywords(pairs):
     if len(pairs) == 0:
         return None
     
-    terms = [t for t, _ in pairs[:12]]
-    scores = [s for _, s in pairs[:12]]
+    terms = [t for t, _ in pairs[:10]]  # Limiter à 10 pour clarté
+    scores = [s for _, s in pairs[:10]]
     
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(7, 4))
     colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(terms)))
-    ax.barh(range(len(terms)), scores, color=colors)
+    ax.barh(range(len(terms)), scores, color=colors, height=0.7)
     ax.set_yticks(range(len(terms)))
-    ax.set_yticklabels(terms[::-1])
-    ax.set_xlabel('TF-IDF Score', fontsize=11, fontweight='bold')
-    ax.set_title('Top Keywords', fontsize=13, fontweight='bold')
-    ax.grid(axis='x', alpha=0.3)
+    ax.set_yticklabels(terms[::-1], fontsize=10)
+    ax.set_xlabel('TF-IDF Score', fontsize=10, fontweight='bold')
+    ax.set_title('Top Keywords', fontsize=12, fontweight='bold')
+    ax.grid(axis='x', alpha=0.3, linestyle='--')
     plt.tight_layout()
     return fig
 
@@ -207,18 +246,18 @@ def plot_sentiment(scores):
     values = [scores['positive'], scores['neutral'], scores['negative']]
     colors = ['#2ecc71', '#95a5a6', '#e74c3c']
     
-    fig, ax = plt.subplots(figsize=(6, 4))
-    bars = ax.bar(labels, values, color=colors, alpha=0.8, edgecolor='black', linewidth=1.5)
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    bars = ax.bar(labels, values, color=colors, alpha=0.85, edgecolor='black', linewidth=1.2)
     
     for bar, val in zip(bars, values):
         height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height,
-                f'{val:.1%}', ha='center', va='bottom', fontsize=12, fontweight='bold')
+        ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                f'{val:.1%}', ha='center', va='bottom', fontsize=11, fontweight='bold')
     
     ax.set_ylim(0, 1)
-    ax.set_ylabel('Probability', fontsize=11, fontweight='bold')
-    ax.set_title('Sentiment Analysis', fontsize=13, fontweight='bold')
-    ax.grid(axis='y', alpha=0.3)
+    ax.set_ylabel('Probability', fontsize=10, fontweight='bold')
+    ax.set_title('Sentiment Analysis (VADER)', fontsize=12, fontweight='bold')
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
     plt.tight_layout()
     return fig
 
@@ -231,13 +270,16 @@ st.markdown("---")
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    num_summary = st.slider("Summary sentences", 3, 10, 5)
-    num_keywords = st.slider("Keywords", 5, 25, 15)
+    num_summary = st.slider("Summary points", 3, 8, 5, help="Number of key sentences")
+    num_keywords = st.slider("Keywords", 5, 20, 12, help="Top distinctive terms")
     show_sentiment = st.checkbox("Sentiment Analysis", value=True)
     show_entities = st.checkbox("Entity Extraction", value=True)
     
     st.markdown("---")
-    st.caption("Powered by TF-IDF & VADER")
+    st.markdown("### 📖 About")
+    st.caption("TF-IDF extractive summarization")
+    st.caption("VADER sentiment analysis")
+    st.caption("Regex entity recognition")
 
 uploaded_file = st.file_uploader("📄 Upload document", type=["pdf", "txt", "html", "htm"])
 
@@ -247,21 +289,20 @@ if uploaded_file:
         with open(temp_path, "wb") as f:
             f.write(uploaded_file.read())
         
-        with st.spinner("📖 Reading..."):
+        with st.spinner("📖 Reading document..."):
             text = read_any(temp_path)
         
-        # FIX : Validation plus permissive
+        # Validation
         words = text.split()
-        if len(words) < 20:
-            st.error("❌ Document too short (< 20 words)")
+        if len(words) < 30:
+            st.error("❌ Document too short (< 30 words)")
+            st.info("💡 Upload a document with at least 50 words for meaningful analysis")
             st.stop()
         
-        if len(text.strip()) < 50:
-            st.warning("⚠️ Very short document. Results may be limited.")
+        st.success(f"✅ Loaded: **{len(text):,}** characters • **{len(words):,}** words")
         
-        st.success(f"✅ Loaded: {len(text):,} characters")
-        
-        with st.spinner("🤖 Analyzing..."):
+        # Analysis
+        with st.spinner("🤖 Analyzing document..."):
             summary = advanced_summarize(text, max_sent=num_summary)
             keywords = extract_keywords(text, top_n=num_keywords)
             
@@ -273,56 +314,72 @@ if uploaded_file:
             if show_entities:
                 entities = extract_entities(text)
         
+        # Check summary
+        if len(summary) == 0:
+            st.error("❌ Could not generate summary")
+            st.info("💡 Document may be too short or poorly formatted")
+            st.stop()
+        
         st.success("✅ Analysis complete!")
         
-        col1, col2 = st.columns([2, 1])
+        # Layout
+        col1, col2 = st.columns([2.5, 1])
         
         with col1:
-            st.subheader("📋 Executive Summary")
+            st.subheader("📋 Key Points Summary")
+            st.caption(f"*Top {len(summary)} sentences (max {MAX_SUMMARY_CHAR} chars each)*")
+            
             for i, sentence in enumerate(summary, 1):
                 st.markdown(f"**{i}.** {sentence}")
             
             st.markdown("---")
             
-            st.subheader("🔑 Top Keywords")
+            st.subheader("🔑 Top Keywords & Phrases")
             if len(keywords) > 0:
                 fig_kw = plot_keywords(keywords)
                 if fig_kw:
                     st.pyplot(fig_kw)
                     plt.close()
                 
-                with st.expander("📊 All scores"):
+                with st.expander("📊 View all keyword scores"):
                     for term, score in keywords:
-                        st.text(f"{term}: {score:.4f}")
+                        st.text(f"• {term}: {score:.4f}")
             else:
-                st.info("No keywords extracted")
+                st.info("ℹ️ No keywords extracted")
             
+            # Entities
             if entities and len(entities) > 0:
                 st.markdown("---")
-                st.subheader("🏷️ Entities")
+                st.subheader("🏷️ Extracted Entities")
                 
-                e1, e2, e3 = st.columns(3)
-                with e1:
-                    if 'monetary_values' in entities:
+                cols = st.columns(3)
+                
+                if 'monetary_values' in entities and len(entities['monetary_values']) > 0:
+                    with cols[0]:
                         st.markdown("**💰 Money**")
-                        for v in entities['monetary_values'][:5]:
+                        for v in sorted(set(entities['monetary_values']))[:6]:
                             st.text(f"• {v}")
-                with e2:
-                    if 'percentages' in entities:
+                
+                if 'percentages' in entities and len(entities['percentages']) > 0:
+                    with cols[1]:
                         st.markdown("**📊 Percentages**")
-                        for v in entities['percentages'][:5]:
+                        for v in sorted(set(entities['percentages']), reverse=True)[:6]:
                             st.text(f"• {v}")
-                with e3:
-                    if 'years' in entities:
-                        st.markdown("**📅 Years**")
-                        for v in entities['years'][:5]:
+                
+                if 'dates' in entities and len(entities['dates']) > 0:
+                    with cols[2]:
+                        st.markdown("**📅 Dates**")
+                        for v in entities['dates'][:6]:
                             st.text(f"• {v}")
         
         with col2:
-            st.subheader("📊 Stats")
+            st.subheader("📊 Document Stats")
             st.metric("Characters", f"{len(text):,}")
             st.metric("Words", f"{len(words):,}")
-            st.metric("Sentences", len(split_sentences(text)))
+            
+            num_sentences = len(split_sentences(text))
+            st.metric("Sentences", num_sentences)
+            
             if len(keywords) > 0:
                 st.metric("Top keyword", keywords[0][0])
             
@@ -336,51 +393,126 @@ if uploaded_file:
                     plt.close()
                 
                 compound = sentiment_scores['compound']
+                
                 if compound >= 0.05:
                     st.success("**Positive tone** 😊")
                 elif compound <= -0.05:
                     st.error("**Negative tone** 😟")
                 else:
                     st.info("**Neutral tone** 😐")
+                
+                st.caption(f"Compound: {compound:.3f}")
         
+        # Export
         st.markdown("---")
-        st.subheader("💾 Export")
+        st.subheader("💾 Export Results")
         
         export_data = {
-            "filename": uploaded_file.name,
-            "timestamp": datetime.now().isoformat(),
+            "metadata": {
+                "filename": uploaded_file.name,
+                "timestamp": datetime.now().isoformat(),
+                "characters": len(text),
+                "words": len(words),
+                "sentences": num_sentences
+            },
             "summary": summary,
-            "keywords": [{"term": t, "score": s} for t, s in keywords],
+            "keywords": [{"term": t, "score": float(s)} for t, s in keywords],
             "sentiment": sentiment_scores if sentiment_scores else {},
             "entities": entities if entities else {}
         }
         
-        st.download_button(
-            "📥 Download JSON",
-            data=json.dumps(export_data, indent=2),
-            file_name=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-            mime="application/json"
-        )
+        col_exp1, col_exp2 = st.columns(2)
+        
+        with col_exp1:
+            st.download_button(
+                label="📥 JSON Export",
+                data=json.dumps(export_data, indent=2, ensure_ascii=False),
+                file_name=f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                use_container_width=True
+            )
+        
+        with col_exp2:
+            markdown_report = f"""# Document Analysis Report
+
+**File:** {uploaded_file.name}  
+**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+## 📋 Key Points
+
+{chr(10).join([f"{i}. {s}" for i, s in enumerate(summary, 1)])}
+
+## 🔑 Top Keywords
+
+{chr(10).join([f"- **{t}**: {s:.4f}" for t, s in keywords[:8]])}
+
+## 📊 Statistics
+
+- **Characters:** {len(text):,}
+- **Words:** {len(words):,}
+- **Sentences:** {num_sentences}
+
+---
+*Generated by InsightLens AI Pro*
+"""
+            
+            st.download_button(
+                label="📥 Markdown Report",
+                data=markdown_report,
+                file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                mime="text/markdown",
+                use_container_width=True
+            )
     
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
-        st.info("💡 Try: text-based PDF (not scanned), or different file")
+        st.info("💡 Try a different file or format")
+        
+        with st.expander("🔍 Debug info"):
+            st.code(str(e))
 
 else:
-    st.info("👆 Upload a document to start")
-    st.markdown("""
-    ### 🎯 Features
-    - Advanced TF-IDF summarization
-    - Multi-gram keyword extraction
-    - VADER sentiment analysis
-    - Entity extraction (money, %, dates)
-    - JSON export
+    st.info("👆 **Upload a document to start**")
     
-    ### ✅ Best for
-    Reports • Papers • Articles • Financial docs
+    col_left, col_right = st.columns(2)
     
-    ### ⚠️ Limitations
-    - Max 50K characters
-    - Text PDFs only (no scans)
-    - Optimized for English
-    """)
+    with col_left:
+        st.markdown("""
+        ### 🎯 What it does
+        
+        - **Summarizes** docs into concise bullet points
+        - **Extracts** key terms and phrases
+        - **Analyzes** sentiment (positive/neutral/negative)
+        - **Identifies** entities (money, %, dates)
+        - **Exports** results in JSON/Markdown
+        
+        ### ✅ Best for
+        
+        - Business reports & contracts
+        - Research papers & articles
+        - Financial documents
+        - Legal texts & case studies
+        """)
+    
+    with col_right:
+        st.markdown("""
+        ### 🚀 Quick start
+        
+        1. Upload PDF, TXT, or HTML
+        2. Adjust settings in sidebar
+        3. Wait 10-20 seconds
+        4. Review & export results
+        
+        ### ⚠️ Limitations
+        
+        - Max 50,000 characters
+        - Text-based PDFs only (no scans)
+        - Minimum 30 words required
+        - Optimized for English
+        
+        ### 💡 Pro tips
+        
+        - Well-formatted docs work best
+        - 500+ word docs give better results
+        - Clear paragraphs improve accuracy
+        """)
