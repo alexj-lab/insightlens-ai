@@ -3,8 +3,7 @@ pymupdf
 beautifulsoup4
 scikit-learn
 matplotlib
-langdetect
-vaderSentiment
 numpy
+vaderSentiment
 
 
