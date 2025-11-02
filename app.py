@@ -59,120 +59,79 @@ def summarize_tfidf(text, max_sent=5):
 
 def top_keywords(text, k=12):
     paras = [p.strip() for p in re.split(r"\n\n+", text) if len(p.strip()) > 30]
-    if not paras or len(paras) < 2:
+    
+    # FIX : Vérifications sans ambiguïté
+    if len(paras) == 0:
+        return []
+    if len(paras) < 2:
         return []
     
     try:
         vec = TfidfVectorizer(stop_words=STOP, max_features=4000, ngram_range=(1, 2))
         X = vec.fit_transform(paras)
         
-        # FIX : Conversion numpy propre
-        scores = np.asarray(X.max(axis=0)).flatten()
+        # Conversion numpy sûre
+        scores_matrix = X.max(axis=0)
+        scores = np.array(scores_matrix).flatten()
         
         terms = vec.get_feature_names_out()
         pairs = sorted(zip(terms, scores), key=lambda x: x[1], reverse=True)
         return pairs[:k]
     except Exception as e:
-        st.warning(f"Could not extract keywords: {str(e)}")
+        print(f"Keyword extraction error: {e}")
         return []
 
 def bar_keywords(pairs):
-    if not pairs:
+    if len(pairs) == 0:
         return None
     terms = [t for t, _ in pairs[:10]]
     vals = [v for _, v in pairs[:10]]
     fig = plt.figure(figsize=(6, 3))
     plt.barh(terms[::-1], vals[::-1], color='#21808d')
     plt.xlabel("TF-IDF Score")
+    plt.title("Top Keywords")
     plt.tight_layout()
     return fig
 
-# UI
+# ========== UI ==========
 st.set_page_config(page_title="InsightLens AI", layout="wide")
 st.title("🧾 InsightLens AI – Smart Document Summarizer")
 
 with st.sidebar:
-    st.header("Settings")
+    st.header("⚙️ Settings")
     kwords = st.slider("Number of keywords", 5, 25, 12)
     st.markdown("---")
-    st.markdown("### About")
-    st.markdown("Analyze documents with TF-IDF summarization and keyword extraction.")
+    st.caption("Powered by TF-IDF & scikit-learn")
 
-upl = st.file_uploader("📄 Upload a document (PDF/TXT/HTML)", type=["pdf", "txt", "html", "htm"])
+upl = st.file_uploader("📄 Upload document (PDF/TXT/HTML)", type=["pdf", "txt", "html", "htm"])
 
 col1, col2 = st.columns([2, 1])
 
 if upl:
     try:
+        # Save uploaded file
         path = f"/tmp/{upl.name}"
         with open(path, "wb") as f:
             f.write(upl.read())
         
+        # Read content
         text = read_any(path)
         
         if len(text.strip()) < 100:
-            st.warning("⚠️ File seems empty or too short (scanned PDF?)")
+            st.warning("⚠️ File too short or empty")
             st.stop()
         
         st.success(f"✅ Loaded {len(text):,} characters")
         
-        with st.spinner("🤖 Analyzing document..."):
+        # Analysis
+        with st.spinner("🤖 Analyzing..."):
             bullets = summarize_tfidf(text, max_sent=5)
             kw = top_keywords(text, k=kwords)
         
+        # Display results
         with col1:
-            st.subheader("📋 Summary")
+            st.subheader("📋 Executive Summary")
             for i, bullet in enumerate(bullets, 1):
-                st.write(f"{i}. {bullet}")
-            
-            st.divider()
-            
-            st.subheader("🔑 Top Keywords")
-            if kw:
-                fig = bar_keywords(kw)
-                if fig:
-                    st.pyplot(fig)
-                
-                with st.expander("View keyword scores"):
-                    for term, score in kw:
-                        st.write(f"**{term}**: {score:.4f}")
-            else:
-                st.info("No keywords extracted (document may be too short)")
-        
-        with col2:
-            st.subheader("📊 Document Stats")
-            st.metric("Characters", f"{len(text):,}")
-            st.metric("Words (approx)", f"{len(text.split()):,}")
-            st.metric("Sentences", len(split_sentences(text)))
-            
-            if kw:
-                top_term = kw[0][0]
-                st.metric("Top keyword", top_term)
-    
-    except Exception as e:
-        st.error(f"❌ Error processing file: {str(e)}")
-        st.info("💡 Try with a different file or check that it's a text-based PDF (not scanned image)")
-else:
-    st.info("👆 Upload a document to start analysis")
-    
-    with st.expander("ℹ️ How it works"):
-        st.markdown("""
-        ### Features
-        - **Smart summarization**: Extracts the 5 most important sentences using TF-IDF
-        - **Keyword extraction**: Identifies distinctive terms and phrases
-        - **Multi-format support**: PDF, TXT, HTML
-        
-        ### Best for
-        - Research papers
-        - Business reports
-        - Articles and blog posts
-        - Financial documents
-        - Legal texts
-        
-        ### Limitations
-        - Max 30,000 characters per document
-        - Scanned PDFs (images) not supported
-        - Works best with English text
-        """)
+                st.markdown
 
 
