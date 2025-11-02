@@ -1,7 +1,7 @@
 import streamlit as st
 import os
 import re
-import fitz
+import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -9,12 +9,16 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
-import warnings
-warnings.filterwarnings('ignore')
+import json
+from datetime import datetime
 
-# Configuration
+# ─────────────────────────────────────────────────────────────
+# Configs & constants
+# ─────────────────────────────────────────────────────────────
 MAX_CHARS = 50000
 MIN_SENTENCE_LENGTH = 20
+TOP_SENTENCES = 8          # nb de phrases candidates avant réécriture
+TOP_KEYWORDS = 15
 
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.size'] = 10
@@ -22,469 +26,462 @@ plt.rcParams['figure.facecolor'] = 'white'
 plt.rcParams['axes.facecolor'] = 'white'
 
 STOP_WORDS = set([
-    "the", "and", "of", "to", "in", "for", "on", "with", "a", "an", "by", "is", "are",
-    "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did",
-    "will", "would", "should", "could", "may", "might", "must", "can", "this", "that",
-    "these", "those", "i", "you", "he", "she", "it", "we", "they", "what", "which",
-    "who", "when", "where", "why", "how", "all", "each", "every", "both", "few", "more",
-    "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so",
-    "than", "too", "very", "just", "but", "or", "as", "at", "from", "into", "through"
+    # EN
+    "the","and","of","to","in","for","on","with","a","an","by","is","are","was","were","be","been","being",
+    "have","has","had","do","does","did","will","would","should","could","may","might","must","can","this",
+    "that","these","those","i","you","he","she","it","we","they","what","which","who","when","where","why",
+    "how","all","each","every","both","few","more","most","other","some","such","no","nor","not","only","own",
+    "same","so","than","too","very","just","but","or","as","at","from","into","through",
+    # FR (basiques)
+    "le","la","les","de","des","du","un","une","et","à","au","aux","en","dans","sur","pour","par","avec","sans",
+    "ce","cet","cette","ces","se","ses","son","sa","leurs","leur","plus","moins","a","ont","est","sont","été",
+    "être","fait","faire","afin","ainsi","donc","car","ou","où"
 ])
 
-# CSS
+# ─────────────────────────────────────────────────────────────
+# UI style
+# ─────────────────────────────────────────────────────────────
+st.set_page_config(page_title="InsightLens AI (Lite+)", layout="wide")
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: 700;
-        color: #1a73e8;
-        margin-bottom: 0.5rem;
-    }
-    .subtitle {
-        font-size: 1rem;
-        color: #5f6368;
-        margin-bottom: 2rem;
-    }
-    .summary-box {
-        background: #ffffff;
-        border: 1px solid #dadce0;
-        border-radius: 8px;
-        padding: 2rem;
-        margin: 2rem 0;
-        box-shadow: 0 1px 2px rgba(60,64,67,0.3);
-    }
-    .summary-text {
-        color: #202124;
-        font-size: 1.05rem;
-        line-height: 1.8;
-        text-align: justify;
-    }
-    .stat-card {
-        background: #ffffff;
-        border: 1px solid #e8eaed;
-        border-radius: 8px;
-        padding: 1.2rem;
-        text-align: center;
-        margin: 0.5rem 0;
-    }
-    .stat-value {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1a73e8;
-    }
-    .stat-label {
-        font-size: 0.875rem;
-        color: #5f6368;
-        margin-top: 0.5rem;
-    }
-    .info-box {
-        background: #e8f0fe;
-        border-left: 4px solid #1967d2;
-        border-radius: 4px;
-        padding: 1rem 1.5rem;
-        margin: 1.5rem 0;
-    }
+    .main-header { font-size: 2.2rem; font-weight: 700; color: #1a73e8; margin-bottom: 0.25rem; }
+    .subtitle { font-size: 0.95rem; color: #5f6368; margin-bottom: 1rem; }
+    .summary-box { background: #fff; border: 1px solid #dadce0; border-radius: 8px; padding: 1rem 1.25rem; margin: 0.75rem 0; }
+    .info-box { background: #e8f0fe; border-left: 4px solid #1967d2; border-radius: 4px; padding: 0.75rem 1rem; margin: 0.75rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# ========== I/O ==========
-def read_pdf(path):
+# ─────────────────────────────────────────────────────────────
+# File reading helpers
+# ─────────────────────────────────────────────────────────────
+def read_pdf(path: str) -> str:
+    """Read textual content from a PDF. Return empty string if nothing extractable."""
     try:
         text = []
         with fitz.open(path) as doc:
+            if doc.is_encrypted:
+                try:
+                    doc.authenticate("")  # try blank password
+                except Exception:
+                    return ""
             for page in doc:
-                page_text = page.get_text()
-                if page_text.strip():
-                    text.append(page_text)
+                t = page.get_text("text")
+                if t.strip():
+                    text.append(t)
         return "\n\n".join(text)
-    except Exception as e:
-        raise ValueError(f"PDF error: {str(e)}")
+    except Exception:
+        return ""
 
-def read_txt(path):
-    for enc in ['utf-8', 'latin-1', 'cp1252']:
+def read_txt(path: str) -> str:
+    for enc in ('utf-8', 'latin-1', 'cp1252'):
         try:
             with open(path, "r", encoding=enc) as f:
                 return f.read()
-        except:
+        except Exception:
             continue
-    raise ValueError("Cannot decode file")
+    return ""
 
-def read_html(path):
+def read_html(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             soup = BeautifulSoup(f, "html.parser")
-            for script in soup(["script", "style"]):
-                script.decompose()
-            return soup.get_text(separator=" ", strip=True)
-    except Exception as e:
-        raise ValueError(f"HTML error: {str(e)}")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        return soup.get_text(separator=" ", strip=True)
+    except Exception:
+        return ""
 
-def clean_text(text):
+def clean_text(text: str) -> str:
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
-    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'\r\n?', '\n', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'[ \t]+', ' ', text)
     return text.strip()
 
-def read_any(path):
+def read_any(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
         text = read_pdf(path)
-    elif ext in [".html", ".htm"]:
+    elif ext in (".html", ".htm"):
         text = read_html(path)
     else:
         text = read_txt(path)
-    
     text = clean_text(text)
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS]
         st.warning(f"⚠️ Document truncated to {MAX_CHARS:,} characters")
-    
     return text
 
+# ─────────────────────────────────────────────────────────────
+# NLP core: segmentation, scoring, MMR, rewrite, keywords
+# ─────────────────────────────────────────────────────────────
+BULLET_PAT = re.compile(r'^\s*[\-\•\–\*]\s+')
+
+def looks_like_heading(ln: str) -> bool:
+    if not ln: return False
+    if len(ln) <= 8:  # very short line (e.g., "Results")
+        return True
+    if ln.endswith(':'):
+        return True
+    letters = re.sub(r'[^A-Za-zÀ-ÖØ-öø-ÿ]', '', ln)
+    if letters:
+        upper_ratio = sum(c.isupper() for c in letters) / max(len(letters), 1)
+        if upper_ratio > 0.6:
+            return True
+    return False
+
+def split_sentences(text: str):
+    """Segment paragraphs, keep bullets and headings, split on .!? with capital after."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    parts, buf = [], []
+    for ln in lines:
+        if BULLET_PAT.match(ln) or looks_like_heading(ln):
+            if buf:
+                parts.append(' '.join(buf)); buf = []
+            parts.append(ln)
+        else:
+            buf.append(ln)
+    if buf: parts.append(' '.join(buf))
+
+    sents = []
+    for p in parts:
+        if BULLET_PAT.match(p) or looks_like_heading(p):
+            sents.append(p)
+            continue
+        # split sentence-ish (FR/EN)
+        chunks = re.split(r'(?<=[\.\!\?])\s+(?=[A-ZÉÈÊÀÂÎÔÛÇ])', p)
+        for c in chunks:
+            c = c.strip()
+            if not c: continue
+            if BULLET_PAT.match(c) or looks_like_heading(c) or len(c) >= MIN_SENTENCE_LENGTH:
+                sents.append(c)
+
+    # dedupe (order-preserving)
+    seen, clean = set(), []
+    for s in sents:
+        key = s.lower()
+        if key not in seen:
+            seen.add(key); clean.append(s)
+    return clean
+
+def title_from_text(text: str) -> str:
+    for ln in text.splitlines():
+        t = ln.strip()
+        if t:
+            return t
+    return ""
+
+def build_tfidf(sentences, max_features=12000):
+    vect = TfidfVectorizer(stop_words=list(STOP_WORDS), ngram_range=(1,2), max_features=max_features)
+    X = vect.fit_transform(sentences)
+    return vect, X
+
+def sentence_position_bonus(n_sent, idx):
+    # earlier sentences get a small bonus (informational structure)
+    return 1.0 - 0.4 * (idx / max(n_sent-1, 1))
+
+def mmr_select(X, k, diversity=0.7):
+    """Maximal Marginal Relevance to avoid redundancy."""
+    sim = cosine_similarity(X)
+    n = sim.shape[0]
+    selected = []
+    # relevance ~ max tf-idf per sentence
+    rel = X.max(axis=1).A.ravel() if hasattr(X.max(axis=1), "A") else np.asarray(X.max(axis=1)).ravel()
+
+    first = int(rel.argmax())
+    selected.append(first)
+    cand = set(range(n)) - {first}
+
+    while len(selected) < min(k, n) and cand:
+        best, best_val = None, -1e9
+        for i in cand:
+            redundancy = max(sim[i, selected]) if selected else 0.0
+            val = (1 - diversity) * rel[i] - diversity * redundancy
+            if val > best_val:
+                best_val, best = val, i
+        selected.append(best); cand.remove(best)
+
+    return sorted(selected)
+
+def rewrite_sentence(s: str) -> str:
+    """
+    Rule-based compression / rewrite to sound more 'abstractive':
+    - remove parentheticals, weak lead-ins, redundant clauses,
+    - normalize connectors,
+    - light lemmatization-like cleanups (regex only).
+    """
+    x = s.strip()
+
+    # remove parentheticals (one level)
+    x = re.sub(r'\s*\([^)]*\)', '', x)
+
+    # drop common lead-ins
+    x = re.sub(r'^(However|Moreover|Furthermore|Additionally|In addition|Ainsi|Cependant|Toutefois)[,:]\s+', '', x, flags=re.IGNORECASE)
+    x = re.sub(r'^(According to|Per|As noted|Comme indiqué|D’après)\s+[^:]+:\s+', '', x, flags=re.IGNORECASE)
+
+    # compress "which/that" relative clauses lightly
+    x = re.sub(r'\s*,\s*(which|that)\s+', ' ', x, flags=re.IGNORECASE)
+
+    # simplify "due to / because of"
+    x = re.sub(r'\b(due to|because of|owing to|en raison de|à cause de)\b', 'because of', x, flags=re.IGNORECASE)
+
+    # normalize connectors
+    x = re.sub(r'\b(in order to|afin de)\b', 'to', x, flags=re.IGNORECASE)
+    x = re.sub(r'\b(such as|comme|par exemple)\b', 'for example', x, flags=re.IGNORECASE)
+
+    # trim whitespace and stray punctuation
+    x = re.sub(r'\s{2,}', ' ', x).strip(' -–—;:,')
+    # ensure period
+    if not re.search(r'[.!?]$', x):
+        x += '.'
+    return x
+
+def summarize_text(text: str, target_sentences=TOP_SENTENCES):
+    """
+    Hybrid extractive → rewrite:
+      1) segment sentences/heads/bullets
+      2) score with TF-IDF centrality + position + title similarity
+      3) select via MMR (diversity)
+      4) rewrite each sentence (compression + connectors)
+      5) return 5 clean bullets
+    """
+    sentences = split_sentences(text)
+    if len(sentences) == 0:
+        return []
+
+    if len(sentences) <= target_sentences:
+        chosen = [rewrite_sentence(s) for s in sentences]
+    else:
+        title = title_from_text(text)
+
+        vect, X = build_tfidf(sentences, max_features=12000)
+        centrality = X.max(axis=1).A.ravel() if hasattr(X.max(axis=1), "A") else np.asarray(X.max(axis=1)).ravel()
+
+        title_sim = np.zeros(len(sentences))
+        if title:
+            try:
+                Xt = vect.transform([title])
+                title_sim = cosine_similarity(X, Xt).ravel()
+            except Exception:
+                title_sim = np.zeros(len(sentences))
+
+        pos_bonus = np.array([sentence_position_bonus(len(sentences), i) for i in range(len(sentences))])
+
+        score = 0.60 * centrality + 0.25 * pos_bonus + 0.15 * title_sim
+        X_bias = X.multiply(score.reshape(-1, 1))
+
+        keep_idx = mmr_select(X_bias, k=target_sentences, diversity=0.7)
+        chosen = [rewrite_sentence(sentences[i]) for i in keep_idx]
+
+    # keep the first 5 as final bullets (clean, no duplicates)
+    bullets = []
+    seen = set()
+    for b in chosen:
+        key = b.lower()
+        if key not in seen and len(b) >= 25:
+            seen.add(key)
+            bullets.append(b)
+        if len(bullets) >= 5:
+            break
+
+    if not bullets:
+        # fallback: take first sentences and rewrite
+        bullets = [rewrite_sentence(s) for s in sentences[:5]]
+    return bullets
+
+def extract_keywords(text: str, top_n=TOP_KEYWORDS):
+    """
+    TF-IDF max over segments (paragraph or fixed chunks) with n-grams (1–3).
+    Filters short/noisy tokens and deduplicates near-duplicates.
+    Returns list of (term, score_float).
+    """
+    paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if len(p.strip()) > 60]
+    if len(paragraphs) < 2:
+        chunk_size = 600
+        paragraphs = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+    if not paragraphs:
+        paragraphs = [text]
+
+    vectorizer = TfidfVectorizer(
+        stop_words=list(STOP_WORDS),
+        ngram_range=(1, 3),
+        max_features=6000,
+        min_df=1,
+        max_df=0.85
+    )
+    X = vectorizer.fit_transform(paragraphs)
+    if X.shape[1] == 0:
+        return []
+
+    # dense-safe
+    if isinstance(X, (coo_matrix, csr_matrix)):
+        X_dense = X.toarray()
+    else:
+        X_dense = np.array(X)
+
+    scores_array = X_dense.max(axis=0)
+    if len(scores_array.shape) > 1:
+        scores_array = scores_array.flatten()
+
+    terms_array = vectorizer.get_feature_names_out()
+    pairs = list(zip(terms_array, scores_array.tolist()))
+
+    def ok(term):
+        if len(term) < 3: return False
+        if re.fullmatch(r'[\W_]+', term): return False
+        if re.fullmatch(r'\d+(\.\d+)?', term): return False
+        return True
+
+    pairs = [(t, float(s)) for t, s in pairs if ok(t)]
+    pairs.sort(key=lambda x: x[1], reverse=True)
+
+    chosen, seen = [], set()
+    for t, s in pairs:
+        low = t.lower()
+        if any(low in k or k in low for k in seen):
+            continue
+        seen.add(low)
+        chosen.append((t, s))
+        if len(chosen) >= top_n:
+            break
+    return chosen
+
+# ─────────────────────────────────────────────────────────────
+# Sentiment (VADER)
+# ─────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_sentiment_analyzer():
     return SentimentIntensityAnalyzer()
 
-def split_sentences(text):
-    sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
-    return [s.strip() for s in sentences if len(s.strip()) >= MIN_SENTENCE_LENGTH]
+def sentiment_scores(text: str):
+    analyzer = load_sentiment_analyzer()
+    s = analyzer.polarity_scores(text[:6000])
+    pos = max(0.0, s.get("pos", 0.0))
+    neu = max(0.0, s.get("neu", 0.0))
+    neg = max(0.0, s.get("neg", 0.0))
+    total = pos + neu + neg or 1.0
+    return {"positive": pos/total, "neutral": neu/total, "negative": neg/total}
 
-def optimized_summary(text, target_sentences=8):
-    """Résumé optimisé court et pertinent"""
-    sentences = split_sentences(text)
-    
-    if len(sentences) <= target_sentences:
-        return " ".join(sentences)
-    
-    try:
-        vectorizer = TfidfVectorizer(
-            stop_words=list(STOP_WORDS),
-            ngram_range=(1, 2),
-            max_features=10000
-        )
-        
-        X = vectorizer.fit_transform(sentences)
-        similarity_matrix = cosine_similarity(X)
-        
-        # TextRank scores
-        scores = np.ones(len(sentences))
-        for _ in range(15):
-            new_scores = np.zeros(len(sentences))
-            for i in range(len(sentences)):
-                for j in range(len(sentences)):
-                    if i != j and similarity_matrix[i][j] > 0.1:
-                        new_scores[i] += similarity_matrix[i][j] * scores[j]
-            scores = 0.85 * new_scores + 0.15
-        
-        # Position bonus
-        position_bonus = np.array([1.0 - (i / len(sentences)) * 0.4 for i in range(len(sentences))])
-        scores = scores * position_bonus
-        
-        # Sélection diverse
-        top_indices = scores.argsort()[-target_sentences:][::-1]
-        top_indices_sorted = sorted(top_indices)
-        
-        selected = [sentences[i] for i in top_indices_sorted]
-        return " ".join(selected)
-    
-    except:
-        return " ".join(sentences[:target_sentences])
-
-def extract_keywords(text, top_n=15):
-    paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if len(p.strip()) > 50]
-    
-    if len(paragraphs) < 2:
-        chunk_size = 500
-        paragraphs = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-    
-    if len(paragraphs) < 2:
-        return []
-    
-    try:
-        vectorizer = TfidfVectorizer(
-            stop_words=list(STOP_WORDS),
-            ngram_range=(1, 3),
-            max_features=5000,
-            min_df=1,
-            max_df=0.8
-        )
-        
-        X = vectorizer.fit_transform(paragraphs)
-        
-        if isinstance(X, (coo_matrix, csr_matrix)):
-            X_dense = X.toarray()
-        else:
-            X_dense = np.array(X)
-        
-        scores_array = X_dense.max(axis=0)
-        if len(scores_array.shape) > 1:
-            scores_array = scores_array.flatten()
-        
-        terms_array = vectorizer.get_feature_names_out()
-        
-        pairs = []
-        for i, term in enumerate(terms_array):
-            try:
-                score = float(scores_array[i])
-                if len(str(term)) > 2 and score > 0:
-                    pairs.append((str(term), score))
-            except:
-                continue
-        
-        return sorted(pairs, key=lambda x: x[1], reverse=True)[:top_n]
-    
-    except:
-        return []
-
-def analyze_sentiment(text):
-    try:
-        analyzer = load_sentiment_analyzer()
-        chunk_size = 5000
-        chunks = [text[i:i+chunk_size] for i in range(0, min(len(text), 20000), chunk_size)]
-        
-        sentiments = [analyzer.polarity_scores(chunk) for chunk in chunks]
-        
-        return {
-            'positive': np.mean([s['pos'] for s in sentiments]),
-            'neutral': np.mean([s['neu'] for s in sentiments]),
-            'negative': np.mean([s['neg'] for s in sentiments]),
-            'compound': np.mean([s['compound'] for s in sentiments])
-        }
-    except:
-        return {'positive': 0, 'neutral': 1, 'negative': 0, 'compound': 0}
-
-def readability_metrics(text):
-    sentences = split_sentences(text)
-    words = text.split()
-    
-    if len(sentences) == 0 or len(words) == 0:
-        return {}
-    
-    return {
-        'avg_sentence_length': len(words) / len(sentences),
-        'long_words_ratio': len([w for w in words if len(w) > 6]) / len(words),
-        'lexical_diversity': len(set([w.lower() for w in words])) / len(words),
-        'total_words': len(words),
-        'unique_words': len(set([w.lower() for w in words])),
-        'total_sentences': len(sentences)
-    }
-
-def plot_sentiment(scores):
-    labels = ['Positive', 'Neutral', 'Negative']
-    values = [scores['positive'], scores['neutral'], scores['negative']]
-    colors = ['#34a853', '#5f6368', '#ea4335']
-    
-    fig, ax = plt.subplots(figsize=(10, 5), facecolor='white')
-    bars = ax.bar(labels, values, color=colors, width=0.5, alpha=0.9)
-    
-    for bar, val in zip(bars, values):
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
-                f'{val:.1%}', ha='center', va='bottom', fontsize=13, fontweight='700')
-    
-    ax.set_ylim(0, 1.1)
-    ax.set_ylabel('Probability', fontsize=12, fontweight='600')
-    ax.set_title('Sentiment Distribution', fontsize=14, fontweight='700', color='#1a73e8', pad=20)
-    ax.grid(axis='y', alpha=0.15)
-    
-    for spine in ['top', 'right']:
-        ax.spines[spine].set_visible(False)
-    
+# ─────────────────────────────────────────────────────────────
+# Viz
+# ─────────────────────────────────────────────────────────────
+def bar_keywords(pairs):
+    if not pairs:
+        fig = plt.figure(figsize=(6, 3))
+        plt.text(0.5, 0.5, "No keywords", ha='center', va='center')
+        plt.axis('off'); return fig
+    terms = [t for t, _ in pairs[:15]]
+    vals = [v for _, v in pairs[:15]]
+    fig = plt.figure(figsize=(6.5, 3.5))
+    plt.barh(terms[::-1], vals[::-1])
+    plt.xlabel("TF-IDF (max per segment)")
     plt.tight_layout()
     return fig
 
-def plot_keywords(pairs):
-    if len(pairs) == 0:
-        return None
-    
-    terms = [t for t, _ in pairs[:12]]
-    scores = [s for _, s in pairs[:12]]
-    
-    fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
-    bars = ax.barh(range(len(terms)), scores, color='#1967d2', height=0.65)
-    
-    for bar, score in zip(bars, scores):
-        width = bar.get_width()
-        ax.text(width + 0.01, bar.get_y() + bar.get_height()/2,
-                f'{score:.3f}', ha='left', va='center', fontsize=10, fontweight='600')
-    
-    ax.set_yticks(range(len(terms)))
-    ax.set_yticklabels(terms[::-1], fontsize=11)
-    ax.set_xlabel('TF-IDF Score', fontsize=12, fontweight='600')
-    ax.set_title('Top Keywords', fontsize=14, fontweight='700', color='#1a73e8', pad=20)
-    ax.grid(axis='x', alpha=0.15)
-    
-    for spine in ['top', 'right']:
-        ax.spines[spine].set_visible(False)
-    
+def bar_sentiment(scores):
+    labels = ["positive", "neutral", "negative"]
+    vals = [scores.get("positive",0), scores.get("neutral",0), scores.get("negative",0)]
+    fig = plt.figure(figsize=(4.2, 3.2))
+    plt.bar(labels, vals)
+    plt.ylim(0, 1)
+    plt.ylabel("Share")
     plt.tight_layout()
     return fig
 
-# ========== INTERFACE ==========
-st.set_page_config(page_title="InsightLens AI Pro", page_icon="🔍", layout="wide")
+# ─────────────────────────────────────────────────────────────
+# Exports
+# ─────────────────────────────────────────────────────────────
+def save_json_md(base_dir: str, payload: dict, bullets: list, keywords: list):
+    os.makedirs(base_dir, exist_ok=True)
+    run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    jpath = os.path.join(base_dir, f"{run_id}.json")
+    mpath = os.path.join(base_dir, f"{run_id}.md")
 
-st.markdown('<p class="main-header">InsightLens AI Pro</p>', unsafe_allow_html=True)
-st.markdown('<p class="subtitle">Professional Document Analysis System</p>', unsafe_allow_html=True)
-st.markdown("---")
+    with open(jpath, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    md = ["# InsightLens Report",
+          f"Date (UTC): {payload['meta']['timestamp']}",
+          f"Characters: {payload['meta']['chars']}",
+          ""]
+    md.append("## Summary (bullets)")
+    for b in bullets:
+        md.append(f"- {b}")
+    md.append("")
+    md.append("## Top Keywords")
+    if keywords:
+        md.append(", ".join([t for t, _ in keywords]))
+    else:
+        md.append("(none)")
+    md.append("")
+    with open(mpath, "w", encoding="utf-8") as f:
+        f.write("\n".join(md))
+    return jpath, mpath
+
+# ─────────────────────────────────────────────────────────────
+# App
+# ─────────────────────────────────────────────────────────────
+st.markdown('<div class="main-header">🧾 InsightLens AI – Smart Document Summarizer</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">Upload a PDF/TXT/HTML → get a clean 5-bullet summary, sentiment, and keywords.</div>', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown("### ⚙️ Settings")
-    num_keywords = st.slider("Keywords", 8, 20, 12)
-    
-    st.markdown("---")
-    st.markdown("### 🤖 AI Models")
-    st.caption("• TextRank")
-    st.caption("• TF-IDF")
-    st.caption("• VADER")
+    st.header("Settings")
+    kwords = st.slider("Number of keywords", 5, 25, TOP_KEYWORDS)
+    st.caption("Tip: TXT/HTML are fastest. For PDFs, use text-based files (not scanned images).")
 
-uploaded_file = st.file_uploader("📂 Upload Document", type=["pdf", "txt", "html", "htm"])
+upl = st.file_uploader("Upload a document (PDF/TXT/HTML)", type=["pdf","txt","html","htm"])
+c1, c2 = st.columns([2,1])
 
-if uploaded_file:
-    try:
-        temp_path = f"/tmp/{uploaded_file.name}"
-        with open(temp_path, "wb") as f:
-            f.write(uploaded_file.read())
-        
-        progress = st.progress(0)
-        status = st.empty()
-        
-        status.text("Reading...")
-        progress.progress(20)
-        text = read_any(temp_path)
-        
-        words = text.split()
-        if len(words) < 100:
-            st.error("❌ Document too short")
-            st.stop()
-        
-        num_sent = len(split_sentences(text))
-        st.success(f"✅ **{uploaded_file.name}** • {len(words):,} words")
-        
-        status.text("Generating summary...")
-        progress.progress(40)
-        summary = optimized_summary(text, target_sentences=8)
-        
-        status.text("Analyzing...")
-        progress.progress(70)
-        sentiment_scores = analyze_sentiment(text)
-        keywords = extract_keywords(text, top_n=num_keywords)
-        readability = readability_metrics(text)
-        
-        progress.progress(100)
-        status.empty()
-        progress.empty()
-        
-        tab1, tab2, tab3, tab4 = st.tabs(["📋 Summary", "💭 Sentiment", "🔑 Keywords", "📊 Statistics"])
-        
-        with tab1:
-            st.markdown("## Executive Summary")
-            
-            st.markdown("""
-            <div class="info-box">
-                <strong>Algorithm:</strong> TextRank (Graph-based)<br>
-                <strong>Quality:</strong> Extracts 8 most important sentences
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown(f"""
-            <div class="summary-box">
-                <div class="summary-text">{summary}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with tab2:
-            st.markdown("## Sentiment Analysis")
-            
-            st.markdown("""
-            <div class="info-box">
-                <strong>Model:</strong> VADER<br>
-                <strong>Scale:</strong> -1 (negative) to +1 (positive)
-            </div>
-            """, unsafe_allow_html=True)
-            
-            fig_sent = plot_sentiment(sentiment_scores)
-            if fig_sent:
-                st.pyplot(fig_sent)
-                plt.close(fig_sent)
-            
-            st.markdown("---")
-            
-            compound = sentiment_scores['compound']
-            
-            # Utiliser st.markdown SANS unsafe_allow_html
-            if compound >= 0.05:
-                st.success("### Overall: POSITIVE ✅")
-            elif compound <= -0.05:
-                st.error("### Overall: NEGATIVE ❌")
-            else:
-                st.info("### Overall: NEUTRAL ➖")
-            
-            st.markdown(f"**Compound Score:** {compound:.3f}")
-            
-            st.markdown("#### Distribution")
-            st.markdown(f"- **Positive:** {sentiment_scores['positive']:.1%} - Favorable language")
-            st.markdown(f"- **Neutral:** {sentiment_scores['neutral']:.1%} - Factual statements")
-            st.markdown(f"- **Negative:** {sentiment_scores['negative']:.1%} - Critical language")
-            
-            st.markdown("#### Interpretation")
-            if compound >= 0.5:
-                st.markdown("**Very positive** document expressing strong favorable sentiment.")
-            elif compound >= 0.05:
-                st.markdown("**Moderately positive** document with constructive tone.")
-            elif compound <= -0.5:
-                st.markdown("**Very negative** document with critical concerns.")
-            elif compound <= -0.05:
-                st.markdown("**Moderately negative** document.")
-            else:
-                st.markdown("**Neutral** document maintaining objective tone.")
-        
-        with tab3:
-            st.markdown("## Keywords")
-            
-            st.markdown("""
-            <div class="info-box">
-                <strong>Algorithm:</strong> TF-IDF<br>
-                <strong>N-grams:</strong> 1-3 words
-            </div>
-            """, unsafe_allow_html=True)
-            
-            if len(keywords) > 0:
-                fig_kw = plot_keywords(keywords)
-                if fig_kw:
-                    st.pyplot(fig_kw)
-                    plt.close(fig_kw)
-                
-                st.markdown("---")
-                for i, (term, score) in enumerate(keywords, 1):
-                    importance = "🔥 Critical" if score > 0.5 else "⭐ High" if score > 0.3 else "📌 Moderate"
-                    with st.expander(f"**{i}. {term}** • {score:.4f} • {importance}"):
-                        st.markdown(f"**Score:** {score:.4f}")
-            else:
-                st.info("No keywords")
-        
-        with tab4:
-            st.markdown("## Statistics")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.markdown(f'<div class="stat-card"><div class="stat-value">{len(text):,}</div><div class="stat-label">Characters</div></div>', unsafe_allow_html=True)
-            
-            with col2:
-                st.markdown(f'<div class="stat-card"><div class="stat-value">{readability["total_words"]:,}</div><div class="stat-label">Words</div></div>', unsafe_allow_html=True)
-            
-            with col3:
-                st.markdown(f'<div class="stat-card"><div class="stat-value">{readability["total_sentences"]}</div><div class="stat-label">Sentences</div></div>', unsafe_allow_html=True)
-            
-            with col4:
-                st.markdown(f'<div class="stat-card"><div class="stat-value">{readability["unique_words"]:,}</div><div class="stat-label">Unique</div></div>', unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            col_r1, col_r2, col_r3 = st.columns(3)
-            
-            with col_r1:
-                st.metric("Avg Sentence", f"{readability['avg_sentence_length']:.1f} words")
-            
-            with col_r2:
-                st.
+if upl:
+    tmp_path = f"/tmp/{upl.name}"
+    with open(tmp_path, "wb") as f:
+        f.write(upl.read())
+
+    text = read_any(tmp_path)
+    if len(text.strip()) < 200:
+        st.error("This file seems empty, scanned, or too short. Use a text-based PDF or a .txt/.html file.")
+        st.stop()
+
+    st.info(f"Loaded {len(text)} characters")
+
+    with st.spinner("Analyzing..."):
+        bullets = summarize_text(text, target_sentences=TOP_SENTENCES)
+        senti = sentiment_scores(text)
+        keywords = extract_keywords(text, top_n=kwords)
+
+    with c1:
+        st.subheader("Summary")
+        if bullets:
+            st.markdown('<div class="summary-box">', unsafe_allow_html=True)
+            for b in bullets:
+                st.write(f"• {b}")
+            st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.warning("No summary could be produced (document may be too short).")
+
+        st.subheader("Top Keywords")
+        st.pyplot(bar_keywords(keywords))
+
+    with c2:
+        st.subheader("Overall Sentiment")
+        st.pyplot(bar_sentiment(senti))
+        with st.expander("Raw scores"):
+            st.json(senti)
+
+    # Exports
+    payload = {
+        "meta": {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "chars": len(text),
+            "top_sentences": TOP_SENTENCES,
+            "top_keywords": kwords,
+        },
+        "summary_bullets": bullets,
+        "sentiment": senti,
+        "keywords": keywords
+    }
+    jpath, mpath = save_json_md("outputs", payload, bullets, keywords)
+    st.success(f"Saved: {jpath}  and  {mpath}")
+
+else:
+    st.info("Drop a PDF / TXT / HTML file to start. For best results, prefer text-based PDFs (not scanned images).")
